@@ -73,27 +73,14 @@ class ServerClientListener(WSListener):
                 sub_req = msgspec.json.decode(
                     frame.get_payload_as_bytes(), type=SubscriptionRequest
                 )
-                symbols = sub_req.symbols
-                event_type = sub_req.event_type
-                interval = sub_req.interval
-                streams = self._build_subscribption_streams(
-                    event_type, symbols, interval
-                )
-
+                
+                streams = sub_req.params
+                
                 for stream in streams:
                     self._streams_subscribed[stream].add(self._client_id)
                     self._logger.debug(f"Subscribed to {stream}")
 
-                if event_type == "kline":
-                    self._binance_client.subscribe_kline(
-                        symbols=symbols, interval=interval
-                    )
-                elif event_type == "bookTicker":
-                    self._binance_client.subscribe_book_ticker(symbols=symbols)
-                elif event_type == "trade":
-                    self._binance_client.subscribe_trade(symbols=symbols)
-                elif event_type == "aggTrade":
-                    self._binance_client.subscribe_agg_trade(symbols=symbols)
+                self._binance_client._subscribe(streams)
 
             except msgspec.DecodeError:
                 self._logger.error("Invalid subscription request")

@@ -42,7 +42,6 @@ class BinanceWSClient(WSClient):
             self._send(payload)
 
     def _subscribe(self, params: List[str]):
-        
         params = [param for param in params if param not in self._subscriptions]
         
         for param in params:

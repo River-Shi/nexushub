@@ -82,9 +82,9 @@ STREAM_URLS = {
 
 
 class SubscriptionRequest(msgspec.Struct):
-    event_type: str
-    symbols: list[str]
-    interval: BinanceKlineInterval | None = None
+    method: str
+    params: list[str]
+    id: int | None = None
 
 
 class BinanceKlineData(msgspec.Struct):
