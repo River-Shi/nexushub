@@ -63,7 +63,7 @@ class Log:
                 retention=retention,
                 compression="zip",
                 enqueue=True,
-                colorize=True,
+                colorize=False,
             )
 
         Log._initialized = True

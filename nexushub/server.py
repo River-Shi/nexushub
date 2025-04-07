@@ -23,7 +23,7 @@ from picows import (
 
 from nexushub.binance import BinanceWSClient, BinanceAccountType
 
-Log.setup_logger()
+Log.setup_logger(log_path="./logs")
 
 class ServerClientListener(WSListener):
     def __init__(
