@@ -24,7 +24,6 @@ from nexushub.binance import BinanceWSClient, BinanceAccountType
 
 logger = Log.get_logger()
 
-
 class ServerClientListener(WSListener):
     def __init__(
         self,
@@ -142,7 +141,7 @@ class Server:
                     client_ref.transport.send(WSMsgType.TEXT, raw)
                 
 
-    async def run(self):
+    async def start(self):
         def listener_factory(r: WSUpgradeRequest):
             return ServerClientListener(
                 self._all_clients, self._streams_subscribed, self._binance_client
@@ -156,11 +155,23 @@ class Server:
         await self._binance_client.connect()
         await self._asyncio_server.serve_forever()
     
-
+    async def stop(self):
+        for client in self._all_clients.values():
+            client_ref = client()
+            client_ref.transport.send_close(1000, b"Server is shutting down")
+        
+        self._binance_client.disconnect()
+        self._asyncio_server.close()
+        logger.debug("Server stopped")
 
 async def main():
-    server = Server()
-    await server.run()
+    try:
+        server = Server()
+        await server.start()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await server.stop()
 
 
 if __name__ == "__main__":

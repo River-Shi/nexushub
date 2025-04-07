@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.11,<4.0"
 dependencies = [
     "aiolimiter>=1.2.1",
-    "cysimdjson>=24.12",
+    "cysimdjson<=24.12",
     "grpcio>=1.71.0",
     "grpcio-tools>=1.71.0",
     "loguru>=0.7.3",
