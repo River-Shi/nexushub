@@ -20,7 +20,7 @@ class ClientListener(WSListener):
             print(f"code: {code}, message: {message.decode('utf-8')}")
         
 def subscribe(transport: WSTransport):
-    payload = msgspec.json.encode(SubscriptionRequest(symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"], event_type="bookTicker")) 
+    payload = msgspec.json.encode(SubscriptionRequest(symbols=["BTCUSDT"], event_type="bookTicker")) 
     transport.send(WSMsgType.TEXT, payload)
 
 

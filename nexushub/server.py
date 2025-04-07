@@ -22,11 +22,12 @@ from picows import (
 
 from nexushub.binance import BinanceWSClient, BinanceAccountType
 
-logger = Log.get_logger()
+Log.setup_logger(log_level="DEBUG")
 
 class ServerClientListener(WSListener):
     def __init__(
         self,
+        logger,
         all_clients: Dict[str, ReferenceType["ServerClientListener"]],
         streams_subscribed: Dict[str, Set[str]],
         binance_client: BinanceWSClient,
@@ -36,27 +37,31 @@ class ServerClientListener(WSListener):
         self._all_clients = all_clients
         self._streams_subscribed = streams_subscribed
         self._binance_client = binance_client
+        self._logger = logger
 
     def on_ws_connected(self, transport: WSTransport):
         self.transport = transport
         self._all_clients[self._client_id] = ref(self)
+        self._logger.info(f"Client {self._client_id} connected")
 
     def on_ws_disconnected(self, transport: WSTransport):
         stream_to_unsubscribe = []
         self._all_clients.pop(self._client_id)
-        
+
         for stream in self._streams_subscribed:
             # Remove this client from the subscribers set for this stream
             self._streams_subscribed[stream].discard(self._client_id)
             # If no clients are subscribed to this stream anymore, we might want to unsubscribe from Binance
             if not self._streams_subscribed[stream]:
-                logger.debug(f"No clients subscribed to {stream}, unsubscribe from Binance here")
+                self._logger.debug(f"Unsubscribe: {stream}")
                 stream_to_unsubscribe.append(stream)
-            
+
         self._binance_client._unsubscribe(stream_to_unsubscribe)
-        
+
         for stream in stream_to_unsubscribe:
             self._streams_subscribed.pop(stream)
+
+        self._logger.info(f"Client {self._client_id} disconnected")
 
     def on_ws_frame(self, transport: WSTransport, frame: WSFrame):
         if frame.msg_type == WSMsgType.CLOSE:
@@ -76,22 +81,28 @@ class ServerClientListener(WSListener):
 
                 for stream in streams:
                     self._streams_subscribed[stream].add(self._client_id)
-                    logger.debug(f"Subscribed to {stream}")
-                    
+                    self._logger.debug(f"Subscribed to {stream}")
+
                 if event_type == "kline":
-                    self._binance_client.subscribe_kline(symbols=symbols, interval=interval)
+                    self._binance_client.subscribe_kline(
+                        symbols=symbols, interval=interval
+                    )
                 elif event_type == "bookTicker":
                     self._binance_client.subscribe_book_ticker(symbols=symbols)
                 elif event_type == "trade":
                     self._binance_client.subscribe_trade(symbols=symbols)
                 elif event_type == "aggTrade":
                     self._binance_client.subscribe_agg_trade(symbols=symbols)
-                    
-                  
-            except msgspec.DecodeError:
-                logger.error("Invalid subscription request")
 
-    def _build_subscribption_streams(self, event_type: str, symbols: List[str], interval: BinanceKlineInterval | None = None):
+            except msgspec.DecodeError:
+                self._logger.error("Invalid subscription request")
+
+    def _build_subscribption_streams(
+        self,
+        event_type: str,
+        symbols: List[str],
+        interval: BinanceKlineInterval | None = None,
+    ):
         if event_type == "kline":
             return [f"{symbol.lower()}@kline_{interval.value}" for symbol in symbols]
         else:
@@ -115,7 +126,8 @@ class Server:
             loop=asyncio.get_event_loop(),
         )
         self._parser = cysimdjson.JSONParser()
-        
+        self._logger = Log.get_logger()
+
     def _handler(self, raw: bytes):
         message = self._parser.parse(raw)
 
@@ -129,40 +141,44 @@ class Server:
             else:
                 stream = f"{symbol.lower()}@{event_type}"
         except KeyError:
-            logger.error(f"Error parsing message: {raw}")
+            id = message.at_pointer("/id")
+            self._logger.debug(f"id: {id}")
             return
-        
+
         if stream in self._streams_subscribed:
             for client_id in self._streams_subscribed[stream]:
                 client = self._all_clients.get(client_id)
-                
+
                 if client:
                     client_ref = client()
                     client_ref.transport.send(WSMsgType.TEXT, raw)
-                
 
     async def start(self):
         def listener_factory(r: WSUpgradeRequest):
             return ServerClientListener(
-                self._all_clients, self._streams_subscribed, self._binance_client
+                self._logger,
+                self._all_clients,
+                self._streams_subscribed,
+                self._binance_client,
             )
 
         self._asyncio_server = await ws_create_server(
             listener_factory, "127.0.0.1", 9001
         )
         for s in self._asyncio_server.sockets:
-            logger.debug(f"Server started on {s.getsockname()}")
+            self._logger.info(f"Server started on {s.getsockname()}")
         await self._binance_client.connect()
         await self._asyncio_server.serve_forever()
-    
+
     async def stop(self):
         for client in self._all_clients.values():
             client_ref = client()
             client_ref.transport.send_close(1000, b"Server is shutting down")
-        
+
         self._binance_client.disconnect()
         self._asyncio_server.close()
-        logger.debug("Server stopped")
+        self._logger.info("Server stopped")
+
 
 async def main():
     try:
