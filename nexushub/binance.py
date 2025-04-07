@@ -22,6 +22,8 @@ class BinanceWSClient(WSClient):
             limiter=AsyncLimiter(max_rate=4, time_period=1),
             handler=handler,
             loop=loop,
+            ping_idle_timeout=10,
+            ping_reply_timeout=5,
         )
     
     def _send_payload(self, params: List[str], chunk_size: int = 100, method: str = "SUBSCRIBE"):
