@@ -1,3 +1,4 @@
+import msgspec
 from enum import Enum
 
 
@@ -78,3 +79,31 @@ STREAM_URLS = {
     BinanceAccountType.USD_M_FUTURE_TESTNET: "wss://stream.binancefuture.com/ws",
     BinanceAccountType.COIN_M_FUTURE_TESTNET: "wss://dstream.binancefuture.com/ws",
 }
+
+
+class SubscriptionRequest(msgspec.Struct):
+    event_type: str
+    symbols: list[str]
+    interval: BinanceKlineInterval | None = None
+
+
+class BinanceKlineData(msgspec.Struct):
+    t: int  # Kline start time
+    T: int  # Kline close time
+    s: str  # Symbol
+    i: BinanceKlineInterval  # Interval
+    f: int  # First trade ID
+    L: int  # Last trade ID
+    o: str  # Open price
+    c: str  # Close price
+    h: str  # High price
+    l: str  # Low price # noqa
+    v: str  # Base asset volume
+    n: int  # Number of trades
+    x: bool  # Is this kline closed?
+    q: str  # Quote asset volume
+    V: str  # Taker buy base asset volume
+    Q: str  # Taker buy quote asset volume
+    B: str  # Ignore
+    timestamp: int
+

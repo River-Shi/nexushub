@@ -1,7 +1,7 @@
 
 import asyncio
 import orjson
-
+import time
 
 from abc import ABC, abstractmethod
 from typing import Any
@@ -137,9 +137,9 @@ class WSClient(ABC):
                 self.disconnect()
             await asyncio.sleep(self._reconnect_interval)
 
-    async def _send(self, payload: dict):
-        await self._limiter.acquire()
+    def _send(self, payload: dict):
         self._transport.send(WSMsgType.TEXT, orjson.dumps(payload))
+        time.sleep(1) 
 
     def disconnect(self):
         if self.connected:
