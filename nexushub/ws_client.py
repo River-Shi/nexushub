@@ -60,7 +60,7 @@ class Listener(WSListener):
                     )
                     return
         except Exception as e:
-            self._log.error(f"Error processing message: {str(e)}")
+            self._log.error(f"Error processing message: {str(e)}", exc_info=True)
 
 
 class WSClient(ABC):

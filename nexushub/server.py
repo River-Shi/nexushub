@@ -152,7 +152,10 @@ class Server:
 
                 if client:
                     client_ref = client()
-                    client_ref.transport.send(WSMsgType.TEXT, raw)
+                    try:
+                        client_ref.transport.send(WSMsgType.TEXT, raw)
+                    except (ConnectionError, BrokenPipeError):
+                        pass
 
     async def start(self, host: str = "127.0.0.1", port: int = 9001):
         def listener_factory(r: WSUpgradeRequest):
