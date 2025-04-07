@@ -1,6 +1,5 @@
 import sys
 import time
-import loguru
 from pathlib import Path
 from typing import Optional
 from loguru import logger
