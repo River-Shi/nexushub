@@ -11,6 +11,7 @@ from weakref import ref, ReferenceType
 from uuid import uuid4
 from collections import defaultdict
 from typing import Set
+import argparse
 from picows import (
     ws_create_server,
     WSFrame,
@@ -22,7 +23,7 @@ from picows import (
 
 from nexushub.binance import BinanceWSClient, BinanceAccountType
 
-Log.setup_logger(log_level="DEBUG")
+Log.setup_logger()
 
 class ServerClientListener(WSListener):
     def __init__(
@@ -153,7 +154,7 @@ class Server:
                     client_ref = client()
                     client_ref.transport.send(WSMsgType.TEXT, raw)
 
-    async def start(self):
+    async def start(self, host: str = "127.0.0.1", port: int = 9001):
         def listener_factory(r: WSUpgradeRequest):
             return ServerClientListener(
                 self._logger,
@@ -163,7 +164,7 @@ class Server:
             )
 
         self._asyncio_server = await ws_create_server(
-            listener_factory, "127.0.0.1", 9001
+            listener_factory, host, port
         )
         for s in self._asyncio_server.sockets:
             self._logger.info(f"Server started on {s.getsockname()}")
@@ -182,8 +183,13 @@ class Server:
 
 async def main():
     try:
+        parser = argparse.ArgumentParser(description='NexusHub WebSocket Server')
+        parser.add_argument('--host', type=str, default='127.0.0.1', help='Host address')
+        parser.add_argument('--port', type=int, default=9001, help='Port number')
+        args = parser.parse_args()
+        
         server = Server()
-        await server.start()
+        await server.start(host=args.host, port=args.port)
     except asyncio.CancelledError:
         pass
     finally:
