@@ -1,6 +1,3 @@
-# This example shows how to maintain a set of active clients and broadcast messages to everybody.
-# The set contains weak references to clients, it is done in order to prevent client from holding references
-# to other clients when server is dead.
 import msgspec
 import asyncio
 import cysimdjson
@@ -23,7 +20,13 @@ from picows import (
 
 from nexushub.binance import BinanceWSClient, BinanceAccountType
 
-Log.setup_logger(log_path="./logs")
+parser = argparse.ArgumentParser(description='NexusHub WebSocket Server')
+parser.add_argument('--host', type=str, default='127.0.0.1', help='Host address')
+parser.add_argument('--port', type=int, default=9001, help='Port number')
+parser.add_argument('--log-level', type=str, default='INFO', help='Log level')
+args = parser.parse_args()
+
+Log.setup_logger(log_path="./logs", log_level=args.log_level)
 
 class ServerClientListener(WSListener):
     def __init__(
@@ -198,11 +201,6 @@ class Server:
 
 async def main():
     try:
-        parser = argparse.ArgumentParser(description='NexusHub WebSocket Server')
-        parser.add_argument('--host', type=str, default='127.0.0.1', help='Host address')
-        parser.add_argument('--port', type=int, default=9001, help='Port number')
-        args = parser.parse_args()
-        
         server = Server()
         await server.start(host=args.host, port=args.port)
     except asyncio.CancelledError:
