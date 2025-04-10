@@ -166,9 +166,9 @@ class Server:
         def listener_factory(r: WSUpgradeRequest):
             path = r.path.decode()
             if path not in ['/spot', '/linear', '/inverse']:
-                self._logger.error(f"Invalid path: {r.path}")
+                self._logger.error(f"Invalid path: {path}")
                 return None
-            self._logger.info(f"Client connected: {r.path}")
+            self._logger.info(f"Client connected: {path}")
             return ServerClientListener(
                 self._logger,
                 self._all_clients,
