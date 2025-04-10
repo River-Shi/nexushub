@@ -1,6 +1,5 @@
 import asyncio
 import msgspec
-from nexushub.constants import SubscriptionRequest
 from nexushub.utils import LiveClock
 from picows import ws_connect, WSFrame, WSTransport, WSListener, WSMsgType
 
@@ -43,4 +42,4 @@ async def main(url):
 
 
 if __name__ == '__main__':
-    asyncio.run(main("ws://127.0.0.1:9001"))
+    asyncio.run(main("ws://127.0.0.1:9001/linear"))

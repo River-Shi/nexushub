@@ -107,34 +107,49 @@ class Server:
         # client_ref is a weak reference to the client
         self._all_clients = {}
         self._asyncio_server = None
-        self._streams_subscribed = defaultdict(set)
-        self._binance_client = BinanceWSClient(
-            account_type=BinanceAccountType.USD_M_FUTURE,
-            handler=self._handler,
-            loop=asyncio.get_event_loop(),
-        )
+        
+        self._streams_subscribed_map = {
+            "/spot": defaultdict(set),
+            "/linear": defaultdict(set),
+            "/inverse": defaultdict(set),
+        }
+        
+        self._binance_clients = {
+            "/spot": BinanceWSClient(
+                BinanceAccountType.SPOT,
+                handler=self._handler,
+                loop=asyncio.get_event_loop(),
+                callback_kwargs={"path": "/spot"},
+            ),
+            "/linear": BinanceWSClient(
+                BinanceAccountType.USD_M_FUTURE,
+                handler=self._handler,
+                loop=asyncio.get_event_loop(),
+                callback_kwargs={"path": "/linear"},
+            ),
+            "/inverse": BinanceWSClient(
+                BinanceAccountType.COIN_M_FUTURE,
+                handler=self._handler,
+                loop=asyncio.get_event_loop(),
+                callback_kwargs={"path": "/inverse"},
+            ),
+        }
         self._parser = cysimdjson.JSONParser()
         self._logger = Log.get_logger()
 
-    def _handler(self, raw: bytes):
+    def _handler(self, raw: bytes, path: str):
         message = self._parser.parse(raw)
 
         try:
-            event_type: str = message.at_pointer("/e")
-            symbol: str = message.at_pointer("/s")
-
-            if event_type == "kline":
-                interval = message.at_pointer("/k/i")
-                stream = f"{symbol.lower()}@kline_{interval}"
-            else:
-                stream = f"{symbol.lower()}@{event_type}"
+            stream = message.at_pointer("/stream")
         except KeyError:
             id = message.at_pointer("/id")
             self._logger.debug(f"id: {id}")
             return
 
-        if stream in self._streams_subscribed:
-            for client_id in self._streams_subscribed[stream]:
+        streams_subscribed = self._streams_subscribed_map[path]
+        if stream in streams_subscribed:
+            for client_id in streams_subscribed[stream]:
                 client = self._all_clients.get(client_id)
 
                 if client:
@@ -146,11 +161,16 @@ class Server:
 
     async def start(self, host: str = "127.0.0.1", port: int = 9001):
         def listener_factory(r: WSUpgradeRequest):
+            path = r.path.decode()
+            if path not in ['/spot', '/linear', '/inverse']:
+                self._logger.error(f"Invalid path: {r.path}")
+                return None
+            self._logger.info(f"Client connected: {r.path}")
             return ServerClientListener(
                 self._logger,
                 self._all_clients,
-                self._streams_subscribed,
-                self._binance_client,
+                self._streams_subscribed_map[path],
+                self._binance_clients[path],
             )
 
         self._asyncio_server = await ws_create_server(
@@ -158,7 +178,10 @@ class Server:
         )
         for s in self._asyncio_server.sockets:
             self._logger.info(f"Server started on {s.getsockname()}")
-        await self._binance_client.connect()
+        
+        for client in self._binance_clients.values():
+            await client.connect()
+        
         await self._asyncio_server.serve_forever()
 
     async def stop(self):
@@ -166,7 +189,9 @@ class Server:
             client_ref = client()
             client_ref.transport.send_close(1000, b"Server is shutting down")
 
-        self._binance_client.disconnect()
+        for ws_client in self._binance_clients.values():
+            ws_client.disconnect()
+        
         self._asyncio_server.close()
         self._logger.info("Server stopped")
 

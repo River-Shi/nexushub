@@ -14,6 +14,8 @@ class BinanceWSClient(WSClient):
         account_type: BinanceAccountType,
         handler: Callable[..., Any],
         loop: asyncio.AbstractEventLoop,
+        callback_args: tuple | None = None,
+        callback_kwargs: dict | None = None,
     ):
         self._account_type = account_type
         url = account_type.ws_url
@@ -24,6 +26,8 @@ class BinanceWSClient(WSClient):
             loop=loop,
             ping_idle_timeout=10,
             ping_reply_timeout=5,
+            callback_args=callback_args,
+            callback_kwargs=callback_kwargs,
         )
     
     def _send_payload(self, params: List[str], chunk_size: int = 100, method: str = "SUBSCRIBE"):

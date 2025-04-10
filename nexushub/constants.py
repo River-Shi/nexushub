@@ -72,12 +72,12 @@ class BinanceAccountType(Enum):
 
 
 STREAM_URLS = {
-    BinanceAccountType.SPOT: "wss://stream.binance.com:9443/ws",
-    BinanceAccountType.USD_M_FUTURE: "wss://fstream.binance.com/ws",
-    BinanceAccountType.COIN_M_FUTURE: "wss://dstream.binance.com/ws",
-    BinanceAccountType.SPOT_TESTNET: "wss://testnet.binance.vision/ws",
-    BinanceAccountType.USD_M_FUTURE_TESTNET: "wss://stream.binancefuture.com/ws",
-    BinanceAccountType.COIN_M_FUTURE_TESTNET: "wss://dstream.binancefuture.com/ws",
+    BinanceAccountType.SPOT: "wss://stream.binance.com:9443/stream",
+    BinanceAccountType.USD_M_FUTURE: "wss://fstream.binance.com/stream",
+    BinanceAccountType.COIN_M_FUTURE: "wss://dstream.binance.com/stream",
+    BinanceAccountType.SPOT_TESTNET: "wss://testnet.binance.vision/stream",
+    BinanceAccountType.USD_M_FUTURE_TESTNET: "wss://stream.binancefuture.com/stream",
+    BinanceAccountType.COIN_M_FUTURE_TESTNET: "wss://dstream.binancefuture.com/stream",
 }
 
 

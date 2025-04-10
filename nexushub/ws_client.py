@@ -19,11 +19,13 @@ from nexushub.utils import Log, LiveClock
 
 
 class Listener(WSListener):
-    def __init__(self, logger, handler: Callable[..., Any], specific_ping_msg=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, logger, handler: Callable[..., Any], callback_args: tuple, callback_kwargs: dict, specific_ping_msg=None):
+        super().__init__()
         self._log = logger
         self._specific_ping_msg = specific_ping_msg
         self._callback = handler
+        self._callback_args = callback_args
+        self._callback_kwargs = callback_kwargs
         self._clock = LiveClock()
 
     def send_user_specific_ping(self, transport: WSTransport):
@@ -50,7 +52,7 @@ class Listener(WSListener):
                     return
                 case WSMsgType.TEXT:
                     # Queue raw bytes for handler to decode
-                    self._callback(frame.get_payload_as_bytes())
+                    self._callback(frame.get_payload_as_bytes(), *self._callback_args, **self._callback_kwargs)
                     return
                 case WSMsgType.CLOSE:
                     close_code = frame.get_close_code()
@@ -79,6 +81,8 @@ class WSClient(ABC):
         ] = "ping_when_idle",
         enable_auto_ping: bool = True,
         enable_auto_pong: bool = False,
+        callback_args: tuple | None = None,
+        callback_kwargs: dict | None = None,
     ):
         self._clock = LiveClock()
         self._url = url
@@ -93,6 +97,8 @@ class WSClient(ABC):
         self._subscriptions = []
         self._limiter = limiter
         self._callback = handler
+        self._callback_args = callback_args or ()
+        self._callback_kwargs = callback_kwargs or {}
         self._lock = asyncio.Lock()
         if auto_ping_strategy == "ping_when_idle":
             self._auto_ping_strategy = WSAutoPingStrategy.PING_WHEN_IDLE
@@ -106,7 +112,7 @@ class WSClient(ABC):
         return self._transport and self._listener
 
     async def _connect(self):
-        WSListenerFactory = lambda: Listener(self._log, self._callback, self._specific_ping_msg)  # noqa: E731
+        WSListenerFactory = lambda: Listener(self._log, self._callback, self._callback_args, self._callback_kwargs, self._specific_ping_msg)  # noqa: E731
         self._transport, self._listener = await ws_connect(
             WSListenerFactory,
             self._url,
