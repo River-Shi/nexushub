@@ -9,9 +9,10 @@ latency = []
 clock = LiveClock()
 msg_count = 0
 
+
 def handler(data):
     try:
-        data = orjson.loads(data)['data']
+        data = orjson.loads(data)["data"]
 
         global msg_count
         msg_count += 1
@@ -20,6 +21,7 @@ def handler(data):
             print_latency()
     except Exception:
         pass
+
 
 def print_latency():
     global latency, msg_count
@@ -35,7 +37,9 @@ def print_latency():
 
 
 async def main():
-    binance_client = BinanceWSClient(BinanceAccountType.USD_M_FUTURE, handler=handler, loop=asyncio.get_event_loop())
+    binance_client = BinanceWSClient(
+        BinanceAccountType.USD_M_FUTURE, handler=handler, loop=asyncio.get_event_loop()
+    )
     await binance_client.connect()
     await asyncio.sleep(5)
     binance_client.subscribe_book_ticker(["BTCUSDT"])

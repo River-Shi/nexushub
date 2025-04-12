@@ -1,11 +1,52 @@
 import asyncio
+import msgspec
+import aiohttp
+import sys
+import tenacity
 from typing import Callable, List
 from typing import Any
 from aiolimiter import AsyncLimiter
 
-
+from urllib.parse import urlencode, urljoin
+from typing import Dict
+from nexushub.schema import (
+    BinanceUMExchangeInfoResponse,
+    BinanceUMKlineResponse,
+    BinanceUMKline,
+)
+from nexushub.constants import BinanceKlineInterval, BinanceAccountType
 from nexushub.ws_client import WSClient
-from nexushub.constants import BinanceAccountType, BinanceKlineInterval
+from nexushub.rest_api import ApiClient
+
+
+class BinanceError(Exception):
+    """
+    The base class for all Binance specific errors.
+    """
+
+    def __init__(self, status, message, headers):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.headers = headers
+
+
+class BinanceServerError(BinanceError):
+    """
+    Represents an Binance specific 500 series HTTP error.
+    """
+
+    def __init__(self, status, message, headers):
+        super().__init__(status, message, headers)
+
+
+class BinanceClientError(BinanceError):
+    """
+    Represents an Binance specific 400 series HTTP error.
+    """
+
+    def __init__(self, status, message, headers):
+        super().__init__(status, message, headers)
 
 
 class BinanceWSClient(WSClient):
@@ -29,14 +70,15 @@ class BinanceWSClient(WSClient):
             callback_args=callback_args,
             callback_kwargs=callback_kwargs,
         )
-    
-    def _send_payload(self, params: List[str], chunk_size: int = 100, method: str = "SUBSCRIBE"):
+
+    def _send_payload(
+        self, params: List[str], chunk_size: int = 100, method: str = "SUBSCRIBE"
+    ):
         # Split params into chunks of 100 if length exceeds 100
         params_chunks = [
-            params[i:i + chunk_size] 
-            for i in range(0, len(params), chunk_size)
+            params[i : i + chunk_size] for i in range(0, len(params), chunk_size)
         ]
-        
+
         for chunk in params_chunks:
             payload = {
                 "method": method,
@@ -47,13 +89,13 @@ class BinanceWSClient(WSClient):
 
     def _subscribe(self, params: List[str]):
         params = [param for param in params if param not in self._subscriptions]
-        
+
         for param in params:
             self._subscriptions.append(param)
             self._log.debug(f"Subscribing to {param}...")
-        
+
         self._send_payload(params)
-    
+
     def _unsubscribe(self, params: List[str]):
         for param in params:
             self._subscriptions.remove(param)
@@ -82,3 +124,163 @@ class BinanceWSClient(WSClient):
 
     async def _resubscribe(self):
         self._send_payload(self._subscriptions)
+
+
+class BinanceApiClient(ApiClient):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: int = 10,
+        max_rate: int | None = None,
+    ):
+        super().__init__(
+            timeout=timeout,
+            max_rate=max_rate,
+        )
+        self._headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "TradingBot/1.0",
+        }
+
+        self.base_url = base_url
+
+    def _prepare_payload(self, payload: Dict[str, Any]) -> str:
+        """Prepare payload by encoding and optionally signing."""
+        payload = {
+            k: str(v).lower() if isinstance(v, bool) else v for k, v in payload.items()
+        }
+        return urlencode(payload)
+
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(3),
+        wait=tenacity.wait_exponential(multiplier=1, min=4, max=15),
+    )
+    async def _fetch(self, method: str, endpoint: str, payload: Dict[str, Any] = None):
+        """Make an asynchronous HTTP request."""
+        if self._limiter:
+            await self._limiter.wait()
+
+        self._init_session()
+
+        url = urljoin(self.base_url, endpoint)
+        payload = payload or {}
+        encoded_payload = self._prepare_payload(payload)
+
+        if method.upper() == "GET":
+            url = f"{url}?{encoded_payload}"
+            data = None
+        else:
+            data = encoded_payload
+
+        self._log.debug(f"Request: {method} {url}")
+
+        try:
+            response = await self._session.request(
+                method=method,
+                url=url,
+                headers=self._headers,
+                data=data,
+            )
+            status = response.status
+            raw = await response.read()
+            self._log.debug(f"Response: {raw}")
+            if 400 <= status < 500:
+                text = await response.text()
+                raise BinanceClientError(status, text, self._headers)
+            elif status >= 500:
+                text = await response.text()
+                raise BinanceServerError(status, text, self._headers)
+            return raw
+
+        except aiohttp.ClientError as e:
+            self._log.error(f"Client Error {method} Url: {url} {e}")
+            raise
+        except asyncio.TimeoutError:
+            self._log.error(f"Timeout {method} Url: {url}")
+            raise
+        except Exception as e:
+            self._log.error(f"Error {method} Url: {url} {e}")
+            raise
+
+
+class BinanceUMApiClient(BinanceApiClient):
+    def __init__(
+        self,
+        timeout: int = 10,
+        max_rate: int | None = None,
+    ):
+        super().__init__(
+            base_url="https://fapi.binance.com",
+            timeout=timeout,
+            max_rate=max_rate,
+        )
+
+        self._exchange_info_decoder = msgspec.json.Decoder(
+            BinanceUMExchangeInfoResponse
+        )
+        self._kline_decoder = msgspec.json.Decoder(list[BinanceUMKlineResponse])
+
+    async def exchange_info(self) -> BinanceUMExchangeInfoResponse:
+        path = "/fapi/v1/exchangeInfo"
+        raw = await self._fetch("GET", path)
+        return self._exchange_info_decoder.decode(raw)
+
+    async def get_api_fapi_v1_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int | None = None,
+        startTime: int | None = None,
+        endTime: int | None = None,
+    ) -> list[BinanceUMKlineResponse]:
+        path = "/fapi/v1/klines"
+        payload = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit,
+            "startTime": startTime,
+            "endTime": endTime,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
+        raw = await self._fetch("GET", path, payload)
+        return self._kline_decoder.decode(raw)
+
+    async def kline_candlestick_data(
+        self,
+        symbol,
+        interval: BinanceKlineInterval,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        limit: int | None = None,
+        include_unconfirmed: bool = False,
+    ) -> BinanceUMKline:
+        end_time_ms = int(end_time) if end_time is not None else sys.maxsize
+        limit = (
+            int(limit) if limit is not None else 499
+        )  # NOTE: 499 only takes 2 weight
+        all_klines: list[BinanceUMKlineResponse] = []
+        while True:
+            klines: list[BinanceUMKlineResponse] = await self.get_api_fapi_v1_klines(
+                symbol=symbol,
+                interval=interval.value,
+                limit=limit,
+                startTime=start_time,
+                endTime=end_time,
+            )
+
+            all_klines.extend(klines)
+
+            # Update the start_time to fetch the next set of bars
+            if klines:
+                next_start_time = klines[-1].open_time + 1
+            else:
+                # Handle the case when klines is empty
+                break
+
+            # No more bars to fetch
+            if (limit and len(klines) < limit) or next_start_time >= end_time_ms:
+                break
+
+            start_time = next_start_time
+
+        return BinanceUMKline(symbol, all_klines, include_unconfirmed)

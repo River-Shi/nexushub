@@ -1,4 +1,3 @@
-
 import asyncio
 import orjson
 import time
@@ -19,7 +18,14 @@ from nexushub.utils import Log, LiveClock
 
 
 class Listener(WSListener):
-    def __init__(self, logger, handler: Callable[..., Any], callback_args: tuple, callback_kwargs: dict, specific_ping_msg=None):
+    def __init__(
+        self,
+        logger,
+        handler: Callable[..., Any],
+        callback_args: tuple,
+        callback_kwargs: dict,
+        specific_ping_msg=None,
+    ):
         super().__init__()
         self._log = logger
         self._specific_ping_msg = specific_ping_msg
@@ -52,7 +58,11 @@ class Listener(WSListener):
                     return
                 case WSMsgType.TEXT:
                     # Queue raw bytes for handler to decode
-                    self._callback(frame.get_payload_as_bytes(), *self._callback_args, **self._callback_kwargs)
+                    self._callback(
+                        frame.get_payload_as_bytes(),
+                        *self._callback_args,
+                        **self._callback_kwargs,
+                    )
                     return
                 case WSMsgType.CLOSE:
                     close_code = frame.get_close_code()
@@ -112,7 +122,13 @@ class WSClient(ABC):
         return self._transport and self._listener
 
     async def _connect(self):
-        WSListenerFactory = lambda: Listener(self._log, self._callback, self._callback_args, self._callback_kwargs, self._specific_ping_msg)  # noqa: E731
+        WSListenerFactory = lambda: Listener(  # noqa: E731
+            self._log,
+            self._callback,
+            self._callback_args,
+            self._callback_kwargs,
+            self._specific_ping_msg,
+        )
         self._transport, self._listener = await ws_connect(
             WSListenerFactory,
             self._url,
@@ -137,7 +153,7 @@ class WSClient(ABC):
                 await self._transport.wait_disconnected()
             except Exception as e:
                 self._log.error(f"Connection error: {e}")
-                
+
             if self.connected:
                 self._log.warning("Websocket reconnecting...")
                 self.disconnect()
@@ -145,7 +161,7 @@ class WSClient(ABC):
 
     def _send(self, payload: dict):
         self._transport.send(WSMsgType.TEXT, orjson.dumps(payload))
-        time.sleep(1) 
+        time.sleep(1)
 
     def disconnect(self):
         if self.connected:

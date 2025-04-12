@@ -6,7 +6,6 @@ from loguru import logger
 from datetime import timezone, datetime
 
 
-
 class LiveClock:
     def __init__(self):
         pass
@@ -66,15 +65,14 @@ class Log:
             )
 
         Log._initialized = True
-    
-    @staticmethod
-    def level(name: str, level: str = "INFO"):
-        logger.level(name, level)
 
     @staticmethod
     def get_logger():
         """获取带有类名上下文的logger"""
+        if not Log._initialized:
+            Log.setup_logger()
         return logger
+
 
 if __name__ == "__main__":
     logger = Log.get_logger()

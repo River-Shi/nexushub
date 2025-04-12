@@ -5,10 +5,11 @@ from picows import ws_connect, WSFrame, WSTransport, WSListener, WSMsgType
 
 clock = LiveClock()
 
+
 class ClientListener(WSListener):
     def on_ws_connected(self, transport: WSTransport):
         print("Client connected")
-    
+
     def on_ws_disconnected(self, transport: WSTransport):
         print("Client disconnected")
 
@@ -20,15 +21,16 @@ class ClientListener(WSListener):
             code = frame.get_close_code()
             message = frame.get_close_message()
             print(f"code: {code}, message: {message.decode('utf-8')}")
-        
+
+
 def subscribe(transport: WSTransport):
     payload = msgspec.json.encode(
         {
             "method": "SUBSCRIBE",
             "params": ["btcusdt@bookTicker"],
-            "id": clock.timestamp_ms()
+            "id": clock.timestamp_ms(),
         }
-    ) 
+    )
     transport.send(WSMsgType.TEXT, payload)
 
 
@@ -41,5 +43,5 @@ async def main(url):
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main("ws://127.0.0.1:9001/linear"))

@@ -1,14 +1,18 @@
 import msgspec
 import asyncio
+import datetime
 import cysimdjson
+import pandas as pd
+import pathlib
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import Optional, Dict, List
-from nexushub.constants import SubscriptionRequest, BinanceKlineInterval
+from nexushub.constants import BinanceKlineInterval
+from nexushub.schema import SubscriptionRequest
 from nexushub.utils import Log
 from weakref import ref, ReferenceType
 from uuid import uuid4
 from collections import defaultdict
 from typing import Set
-import argparse
 from picows import (
     ws_create_server,
     WSFrame,
@@ -17,16 +21,9 @@ from picows import (
     WSMsgType,
     WSUpgradeRequest,
 )
+from nexushub.binance import BinanceWSClient, BinanceAccountType, BinanceUMApiClient
+from nexushub.utils import LiveClock
 
-from nexushub.binance import BinanceWSClient, BinanceAccountType
-
-parser = argparse.ArgumentParser(description='NexusHub WebSocket Server')
-parser.add_argument('--host', type=str, default='127.0.0.1', help='Host address')
-parser.add_argument('--port', type=int, default=9001, help='Port number')
-parser.add_argument('--log-level', type=str, default='INFO', help='Log level')
-args = parser.parse_args()
-
-Log.setup_logger(log_path="./logs", log_level=args.log_level)
 
 class ServerClientListener(WSListener):
     def __init__(
@@ -76,9 +73,9 @@ class ServerClientListener(WSListener):
                 sub_req = msgspec.json.decode(
                     frame.get_payload_as_bytes(), type=SubscriptionRequest
                 )
-                
+
                 streams = sub_req.params
-                
+
                 for stream in streams:
                     self._streams_subscribed[stream].add(self._client_id)
                     self._logger.debug(f"Subscribed to {stream}")
@@ -105,20 +102,14 @@ class Server:
     _asyncio_server: Optional[asyncio.Server]
 
     def __init__(self):
-        # {client_id: client_ref}
-        # client_id is a uuid4
-        # client_ref is a weak reference to the client
         self._all_clients = {}
         self._asyncio_server = None
-        
-        # stream -> set of client_ids  btcusdt@bookTicker -> {client_id_1, client_id_2}
-        
         self._streams_subscribed_map = {
             "/spot": defaultdict(set),
             "/linear": defaultdict(set),
             "/inverse": defaultdict(set),
         }
-        
+
         self._binance_clients = {
             "/spot": BinanceWSClient(
                 BinanceAccountType.SPOT,
@@ -167,7 +158,7 @@ class Server:
     async def start(self, host: str = "127.0.0.1", port: int = 9001):
         def listener_factory(r: WSUpgradeRequest):
             path = r.path.decode()
-            if path not in ['/spot', '/linear', '/inverse']:
+            if path not in ["/spot", "/linear", "/inverse"]:
                 self._logger.error(f"Invalid path: {path}")
                 return None
             self._logger.info(f"Client connected: {path}")
@@ -178,15 +169,13 @@ class Server:
                 self._binance_clients[path],
             )
 
-        self._asyncio_server = await ws_create_server(
-            listener_factory, host, port
-        )
+        self._asyncio_server = await ws_create_server(listener_factory, host, port)
         for s in self._asyncio_server.sockets:
             self._logger.info(f"Server started on {s.getsockname()}")
-        
+
         for client in self._binance_clients.values():
             await client.connect()
-        
+
         await self._asyncio_server.serve_forever()
 
     async def stop(self):
@@ -196,20 +185,124 @@ class Server:
 
         for ws_client in self._binance_clients.values():
             ws_client.disconnect()
-        
+
         self._asyncio_server.close()
         self._logger.info("Server stopped")
 
 
-async def main():
-    try:
-        server = Server()
-        await server.start(host=args.host, port=args.port)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        await server.stop()
+class HistoryServer:
+    """
+    1s 20 rate limit
+    """
 
+    def __init__(
+        self,
+        save_dir: str,
+        freq: BinanceKlineInterval,
+        init_days: int,
+        redownload: bool = False,
+    ):
+        self._rate = 2400 / 60 / 2
+        self._logger = Log.get_logger()
+        self._api = BinanceUMApiClient(max_rate=self._rate)
+        self._freq = freq
+        self._save_dir = pathlib.Path(save_dir) / f"{freq.value}"
+        self._save_dir.mkdir(parents=True, exist_ok=True)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        self._init_days = init_days
+        self._clock = LiveClock()
+        self._scheduler = AsyncIOScheduler()
+        self._event = asyncio.Event()
+        self._redownload = redownload
+
+    def _check_rate_limit(self, symbols: List[str]):
+        num_symbols = len(symbols)
+        request_per_sec = self._rate  # max request can be made per second
+        init_days_2_sec = self._init_days * 24 * 60 * 60  # total seconds to download
+        per_request_sec = self._freq.seconds * 499  # one request seconds
+
+        num_requests_needed = init_days_2_sec / per_request_sec * num_symbols
+        sec_requests_takes = num_requests_needed / request_per_sec
+
+        if sec_requests_takes * 2 > self._freq.seconds:
+            raise RuntimeError(
+                f"Not recommended to download freq: {self._freq.value} for {self._init_days} days. Please reduce the `init_days` or choose a higher `frequency`."
+            )
+
+    async def _download_symbol(self, symbol: str):
+        file_path = self._save_dir / f"{symbol}.parquet"
+
+        if file_path.exists() and not self._redownload:
+            df = pd.read_parquet(file_path)
+            start_time = df['open_time'].values[-1] + 1
+            klines = await self._api.kline_candlestick_data(
+                symbol,
+                self._freq,
+                start_time=start_time,
+                include_unconfirmed=False,
+                limit=99,
+            )
+            new_df = klines.df
+            if new_df is None:
+                return
+            df = pd.concat([df, new_df])
+            df.to_parquet(file_path)
+        else:
+            start_time = (
+                self._clock.timestamp_ms() - 1000 * 60 * 60 * 24 * self._init_days
+            )
+            klines = await self._api.kline_candlestick_data(
+                symbol, self._freq, start_time=start_time, include_unconfirmed=False
+            )
+            df = klines.df
+            if df is None:
+                return
+            df.to_parquet(file_path)
+
+    async def update(self, symbols: List[str]):
+        tasks = []
+        for symbol in symbols:
+            tasks.append(self._download_symbol(symbol))
+
+        await asyncio.gather(*tasks)
+        self._logger.info(f"Updated {len(symbols)} symbols")
+
+    async def start(self):
+        try:
+            trigger_map = {
+                BinanceKlineInterval.MINUTE_1: {"second": "1", "minute": "*"},
+                BinanceKlineInterval.MINUTE_3: {"second": "1", "minute": "*/3"},
+                BinanceKlineInterval.MINUTE_5: {"second": "1", "minute": "*/5"},
+                BinanceKlineInterval.MINUTE_15: {"second": "1", "minute": "*/15"},
+                BinanceKlineInterval.MINUTE_30: {"minute": "*/30"},
+                BinanceKlineInterval.HOUR_1: {"hour": "*", "minute": "0", "second": "1"},
+                BinanceKlineInterval.HOUR_4: {"hour": "*/4", "minute": "0", "second": "1"},
+                BinanceKlineInterval.HOUR_8: {"hour": "*/8", "minute": "0", "second": "1"},
+                BinanceKlineInterval.HOUR_12: {"hour": "*/12", "minute": "0", "second": "1"},
+                BinanceKlineInterval.DAY_1: {"hour": "0", "minute": "0", "second": "1"},
+            }
+
+            info = await self._api.exchange_info()
+            symbols = info.active_symbols
+
+            self._logger.info(f"Start downloading {len(symbols)} symbols")
+
+            self._check_rate_limit(symbols)
+
+            await self.update(symbols)
+
+            self._scheduler.add_job(
+                self.update,
+                "cron",
+                **trigger_map[self._freq],
+                kwargs={"symbols": symbols},
+            )
+            self._scheduler.start()
+
+            await self._event.wait()
+        finally:
+            await self.stop()
+
+    async def stop(self):
+        await self._api.close_session()
+        self._event.set()
