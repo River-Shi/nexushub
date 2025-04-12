@@ -27,7 +27,7 @@ def print_latency():
     avg = np.mean(latency)
     mid = np.median(latency)
     q_99 = np.percentile(latency, 99)
-    print(f"--- Latency Statistics (n={length}) ---")
+    print("--- Latency Statistics ---")
     print(f"Mean: {avg:.4f} ms | Median: {mid:.4f} ms | 99th Percentile: {q_99:.4f} ms")
     print(f"Min: {min(latency):.4f} ms | Max: {max(latency):.4f} ms")
     latency = []  # Reset latency after printing statistics

@@ -111,6 +111,8 @@ class Server:
         self._all_clients = {}
         self._asyncio_server = None
         
+        # stream -> set of client_ids  btcusdt@bookTicker -> {client_id_1, client_id_2}
+        
         self._streams_subscribed_map = {
             "/spot": defaultdict(set),
             "/linear": defaultdict(set),
