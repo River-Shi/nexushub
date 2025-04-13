@@ -213,11 +213,10 @@ class SharedThrottler:
         
     def _notify_waiters(self):
         """notify the waiting tasks"""
-        while self._waiters:
+        if self._waiters:
             waiter = self._waiters[0]
             if not waiter.done():
-                waiter.set_result(None)
-            self._waiters.popleft()
+                waiter.set_result(True)
             
     @contextmanager
     def _acquire_lock(self, timeout: float = 1.0):
@@ -278,19 +277,19 @@ class SharedThrottler:
                             self._notify_waiters()
                             
                         return
-                    
-                    window_start = self._data[0]
-                    wait_time = max(0, window_start + self.period - time.time())
-                    
-                    if my_waiter is None:
-                        my_waiter = asyncio.get_running_loop().create_future()
-                        self._waiters.append(my_waiter)
+                    else:
+                        window_start = self._data[0]
+                        wait_time = max(0, window_start + self.period - time.time())
                         
-                    self._logger.debug(
-                        f"[{self.shm_name}] Limit reached ({current_weight}/{self.rate_limit}). "
-                        f"Need {weight} weight. "
-                        f"Waiting {wait_time:.2f}s for reset"
-                    )
+                        if my_waiter is None:
+                            my_waiter = asyncio.get_running_loop().create_future()
+                            self._waiters.append(my_waiter)
+                            
+                        self._logger.debug(
+                            f"[{self.shm_name}] Limit reached ({current_weight}/{self.rate_limit}). "
+                            f"Need {weight} weight. "
+                            f"Waiting {wait_time:.2f}s for reset"
+                        )
                     
             except TimeoutError:
                 self._logger.debug(f"[{self.shm_name}] Timeout error, waiting for 0.1s")
