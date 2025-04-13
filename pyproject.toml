@@ -15,6 +15,7 @@ dependencies = [
     "certifi>=2025.1.31",
     "cysimdjson<=24.12",
     "duckdb>=1.2.2",
+    "filelock>=3.18.0",
     "grpcio>=1.71.0",
     "grpcio-tools>=1.71.0",
     "loguru>=0.7.3",

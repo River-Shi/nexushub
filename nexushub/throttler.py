@@ -6,6 +6,8 @@ from multiprocessing import shared_memory, Lock
 import numpy as np
 from typing import Deque
 from contextlib import contextmanager
+from filelock import FileLock 
+import os
 
 class AsyncThrottler:
     """
@@ -172,12 +174,17 @@ class SharedThrottler:
             raise ValueError("Rate limit must be positive")
         if period <= 0:
             raise ValueError("Period must be positive")
-            
+        if name.startswith("/"):
+            raise ValueError("Shared memory name cannot start with '/'")
+        
         self.rate_limit = rate_limit
         self.period = period
         self.shm_name = name
         self._logger = Log.get_logger()
-        self._lock = Lock()
+        
+        
+        lock_file = f"/tmp/{name}.lock"
+        self._lock = FileLock(lock_file)
         
         # waiting queue (in-process)
         self._waiters: Deque[asyncio.Future] = deque()
@@ -323,10 +330,6 @@ class SharedThrottler:
             except Exception as e:
                 self._logger.error(f"Error in close: {e}")
     
-    def __del__(self):
-        """Ensure cleanup on object destruction."""
-        self.cleanup()
-    
     
     
 
@@ -386,6 +389,7 @@ async def main():
     # With the 2400/60s limit, the 5 heavy tasks alone exceed the limit.
     # The total time should be slightly over 60 seconds if the last heavy task
     # had to wait for the window reset.
+    throttler.cleanup()
 
 if __name__ == "__main__":
     # To see debug logs, uncomment this line:
