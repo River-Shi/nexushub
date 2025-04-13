@@ -295,11 +295,3 @@ class BinanceUMApiClient(BinanceApiClient):
             start_time = next_start_time
 
         return BinanceUMKline(symbol, all_klines, include_unconfirmed)
-
-async def main():
-    client = BinanceUMApiClient()
-    info = await client.exchange_info()
-    print(info)
-    await client.close_session()
-
-asyncio.run(main())

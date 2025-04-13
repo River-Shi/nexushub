@@ -2,6 +2,10 @@ import asyncio
 import time
 from collections import deque
 from nexushub.utils import Log
+from multiprocessing import shared_memory, Lock
+import numpy as np
+from typing import Deque
+from contextlib import contextmanager
 
 class AsyncThrottler:
     """
@@ -34,7 +38,7 @@ class AsyncThrottler:
 
         self._logger.debug(f"Throttler initialized: Limit={rate_limit} weight / {period} seconds")
 
-    def _check_and_reset_window(self) -> None:
+    def _check_and_reset_window(self) -> bool:
         """Internal method to check if the window needs resetting. Must be called under lock."""
         now = time.monotonic()
         elapsed = now - self._window_start_time # unit: seconds
@@ -44,8 +48,8 @@ class AsyncThrottler:
             old_weight = self._current_weight
             self._current_weight = 0
             self._logger.debug(f"Time window reset. Start: {self._window_start_time:.2f}, Old Weight: {old_weight}")
-            # Wake up waiting tasks if any, as the window reset might allow them to proceed
-            self._notify_waiters()
+            return True
+        return False
 
     def _notify_waiters(self):
         """Notify the first waiter, if any."""
@@ -77,7 +81,7 @@ class AsyncThrottler:
         while True:
             async with self._lock:
                 # Check and potentially reset the time window
-                self._check_and_reset_window()
+                was_reset = self._check_and_reset_window()
 
                 # Check if the current request can be accommodated
                 if self._current_weight + weight <= self.rate_limit:
@@ -94,7 +98,8 @@ class AsyncThrottler:
                              pass
 
                     # Notify the *next* waiter if there's still capacity after this acquisition
-                    self._notify_waiters()
+                    if was_reset:
+                        self._notify_waiters()
                     return # Exit the loop and method
 
                 # No, need to wait
@@ -111,42 +116,22 @@ class AsyncThrottler:
 
             # === Wait outside the lock ===
             try:
-                 # Wait either for the calculated reset time or until notified
-                 # Check waiter future: wait until notified by _notify_waiters
+                # Wait for the calculated reset time
                 await asyncio.wait_for(my_waiter_future, timeout=max(0, time_until_reset) + 0.01) # Small buffer
-                # If wait_for completes without timeout, it means we were notified.
-                # Reset the future for the next potential wait cycle within the loop.
-                if my_waiter_future in self._waiters and my_waiter_future.done():
-                    # Need a new future if we have to wait again
-                    idx = self._waiters.index(my_waiter_future)
-                    new_future = asyncio.get_running_loop().create_future()
-                    self._waiters[idx] = new_future
-                    my_waiter_future = new_future
-
+                # If we get here, it means we were notified, but this should never happen
+                # since the window can only reset after the full period
+                continue
             except asyncio.TimeoutError:
                 # Timeout occurred, means the window should have reset.
                 # Loop will re-acquire lock and check state again.
-                 # If the future was present, remove it as timeout implies it's stale
                 if my_waiter_future in self._waiters:
-                   try:
-                       self._waiters.remove(my_waiter_future)
-                       # Need a new future if we have to wait again
-                       my_waiter_future = None
-                   except ValueError:
-                       pass # Already removed
-                continue # Go back to the start of the while loop to re-check
-
-            except asyncio.CancelledError:
-                 # If the task using the throttler is cancelled, clean up the waiter future
-                if my_waiter_future and my_waiter_future in self._waiters:
                     try:
                         self._waiters.remove(my_waiter_future)
-                        # Notify next potentially? Or let naturale flow handle it?
-                        # Let's notify just in case this cancellation frees up a slot implicitly
-                        self._notify_waiters()
+                        my_waiter_future = None
                     except ValueError:
                         pass # Already removed
-                raise # Re-raise the cancellation
+                continue # Go back to the start of the while loop to re-check
+            
 
     async def __aenter__(self, weight: int = 1) -> None:
         """
@@ -167,6 +152,183 @@ class AsyncThrottler:
         No cleanup needed as the weight is automatically reset after the period.
         """
         pass
+    
+    
+
+
+class SharedThrottler:
+    """
+    A cross-process rate limiter based on shared memory.
+    Ensures multiple processes share the same limiter by using the shared memory name.
+    Shared memory structure: [window_start_time, current_weight, ref_count]
+    """
+    def __init__(
+        self,
+        rate_limit: int,
+        period: float = 60.0,
+        name: str = "nexushub_throttler"
+    ):
+        if rate_limit <= 0:
+            raise ValueError("Rate limit must be positive")
+        if period <= 0:
+            raise ValueError("Period must be positive")
+            
+        self.rate_limit = rate_limit
+        self.period = period
+        self.shm_name = name
+        self._logger = Log.get_logger()
+        self._lock = Lock()
+        
+        # waiting queue (in-process)
+        self._waiters: Deque[asyncio.Future] = deque()
+        
+        # initialize or connect to the shared memory
+        try:
+            # Try to connect to existing shared memory first
+            self._shm = shared_memory.SharedMemory(name=name)
+            self._data = np.ndarray((3,), dtype=np.float64, buffer=self._shm.buf)
+            with self._acquire_lock():
+                self._data[2] += 1  # Increment reference count
+            self._logger.debug(f"Connected to existing shared memory '{name}', ref_count={self._data[2]}")
+        except FileNotFoundError:
+            # If not exists, create new shared memory
+            self._shm = shared_memory.SharedMemory(
+                name=name,
+                create=True,
+                size=3 * 8  # 3 float64
+            )
+            self._data = np.ndarray((3,), dtype=np.float64, buffer=self._shm.buf)
+            self._data[0] = time.time()  # window_start_time
+            self._data[1] = 0.0  # current_weight
+            self._data[2] = 1.0  # reference count
+            self._logger.debug(f"Created new shared memory '{name}', ref_count=1")
+        
+        
+    def _notify_waiters(self):
+        """notify the waiting tasks"""
+        while self._waiters:
+            waiter = self._waiters[0]
+            if not waiter.done():
+                waiter.set_result(None)
+            self._waiters.popleft()
+            
+    @contextmanager
+    def _acquire_lock(self, timeout: float = 1.0):
+        """get the process lock context manager"""
+        acquired = self._lock.acquire(timeout=timeout)
+        if not acquired:
+            raise TimeoutError("Failed to acquire lock")
+        try:
+            yield
+        finally:
+            self._lock.release()
+            
+    def _check_and_reset_window(self) -> bool:
+        """check and reset the time window"""
+        now = time.time()
+        window_start = self._data[0]
+        
+        if now - window_start >= self.period:
+            self._data[0] = now
+            old_weight = self._data[1]
+            self._data[1] = 0.0
+            self._logger.debug(
+                f"Time window reset in shared memory '{self.shm_name}'. "
+                f"Old weight: {old_weight}"
+            )
+            return True
+        return False
+            
+    async def acquire(self, weight: int = 1) -> None:
+        """acquire the weight permission"""
+        if weight < 0:
+            raise ValueError("Weight cannot be negative")
+        if weight > self.rate_limit:
+            raise ValueError(f"Weight {weight} exceeds limit {self.rate_limit}")
+            
+        my_waiter = None
+        
+        while True:
+            try:
+                with self._acquire_lock():
+                    was_reset = self._check_and_reset_window()
+                    current_weight = self._data[1]
+                    
+                    if current_weight + weight <= self.rate_limit:
+                        self._data[1] = current_weight + weight
+                        self._logger.debug(
+                            f"[{self.shm_name}] Acquired {weight} weight. "
+                            f"Current total: {current_weight + weight}/{self.rate_limit}"
+                        )
+                        
+                        if my_waiter and my_waiter in self._waiters:
+                            try:
+                                self._waiters.remove(my_waiter)
+                            except ValueError:
+                                pass
+                            
+                        if was_reset:
+                            self._notify_waiters()
+                            
+                        return
+                    
+                    window_start = self._data[0]
+                    wait_time = max(0, window_start + self.period - time.time())
+                    
+                    if my_waiter is None:
+                        my_waiter = asyncio.get_running_loop().create_future()
+                        self._waiters.append(my_waiter)
+                        
+                    self._logger.debug(
+                        f"[{self.shm_name}] Limit reached ({current_weight}/{self.rate_limit}). "
+                        f"Need {weight} weight. "
+                        f"Waiting {wait_time:.2f}s for reset"
+                    )
+                    
+            except TimeoutError:
+                self._logger.debug(f"[{self.shm_name}] Timeout error, waiting for 0.1s")
+                await asyncio.sleep(0.1)
+                continue
+                
+            try:
+                await asyncio.wait_for(
+                    my_waiter,
+                    timeout=max(0, wait_time) + 0.01
+                )
+            except asyncio.TimeoutError:
+                continue
+                
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+    
+    def cleanup(self):
+        """Close the shared memory connection and update reference count."""
+        if hasattr(self, '_shm'):
+            try:
+                with self._acquire_lock():
+                    self._data[2] -= 1  # Decrement reference count
+                    ref_count = self._data[2]
+                    self._logger.debug(f"Decremented ref_count to {ref_count} for '{self.shm_name}'")
+                    
+                    if ref_count <= 0:
+                        self._shm.unlink()
+                        self._logger.debug(f"Unlinked shared memory '{self.shm_name}' as last user")
+                    
+                self._shm.close()
+                self._logger.debug(f"Closed shared memory connection '{self.shm_name}'")
+            except Exception as e:
+                self._logger.error(f"Error in close: {e}")
+    
+    def __del__(self):
+        """Ensure cleanup on object destruction."""
+        self.cleanup()
+    
+    
+    
 
 # --- Example Usage ---
 
@@ -200,8 +362,8 @@ async def main():
 
     # Use Binance actual limits
     binance_limit = 100
-    binance_period = 60.0 # seconds
-    throttler = AsyncThrottler(rate_limit=binance_limit, period=binance_period)
+    binance_period = 10 # seconds
+    throttler = SharedThrottler(rate_limit=binance_limit, period=binance_period)
 
 
     tasks = []
@@ -209,8 +371,8 @@ async def main():
     for i in range(11): # Simulate 5 order fetches
         tasks.append(fetch_order_data(throttler, i + 1))
 
-    for i in range(20): # Simulate 20 ticker fetches
-        tasks.append(fetch_ticker_data(throttler, f"SYM{i+1}"))
+    # for i in range(20): # Simulate 20 ticker fetches
+    #     tasks.append(fetch_ticker_data(throttler, f"SYM{i+1}"))
 
     start_time = time.time()
     await asyncio.gather(*tasks)
@@ -227,5 +389,5 @@ async def main():
 
 if __name__ == "__main__":
     # To see debug logs, uncomment this line:
-    # logging.getLogger().setLevel(logging.DEBUG)
+    Log.setup_logger(log_level="DEBUG")
     asyncio.run(main())
