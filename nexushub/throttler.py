@@ -148,10 +148,25 @@ class AsyncThrottler:
                         pass # Already removed
                 raise # Re-raise the cancellation
 
+    async def __aenter__(self, weight: int = 1) -> None:
+        """
+        Asynchronous context manager entry point.
+        
+        Args:
+            weight: The weight cost of the operation to be performed.
+            
+        Returns:
+            None
+        """
+        await self.acquire(weight)
+        return None
 
-    # Optional: Context manager interface (though acquire() is often clearer)
-    # Usage: async with throttler(weight=10): ...
-    # Not implementing fully here as acquire() is the core, but it's possible.
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Asynchronous context manager exit point.
+        No cleanup needed as the weight is automatically reset after the period.
+        """
+        pass
 
 # --- Example Usage ---
 
