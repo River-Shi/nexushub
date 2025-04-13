@@ -1,6 +1,5 @@
 import msgspec
 import asyncio
-import datetime
 import cysimdjson
 import pandas as pd
 import pathlib
@@ -204,7 +203,7 @@ class HistoryServer:
     ):
         self._rate = 2400 / 60 / 2
         self._logger = Log.get_logger()
-        self._api = BinanceUMApiClient(max_rate=self._rate)
+        self._api = BinanceUMApiClient()
         self._freq = freq
         self._save_dir = pathlib.Path(save_dir) / f"{freq.value}"
         self._save_dir.mkdir(parents=True, exist_ok=True)

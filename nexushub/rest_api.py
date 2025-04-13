@@ -3,7 +3,7 @@ from abc import ABC
 from typing import Optional
 import ssl
 import certifi
-import asynciolimiter
+from nexushub.throttler import AsyncThrottler
 from nexushub.utils import Log, LiveClock
 
 
@@ -12,6 +12,7 @@ class ApiClient(ABC):
         self,
         timeout: int = 10,
         max_rate: int | None = None,
+        period: float = 60,
     ):
         self._timeout = timeout
         self._log = Log.get_logger()
@@ -20,7 +21,7 @@ class ApiClient(ABC):
         self._clock = LiveClock()
 
         if max_rate:
-            self._limiter = asynciolimiter.Limiter(rate=max_rate)
+            self._limiter = AsyncThrottler(rate_limit=max_rate, period=period)
         else:
             self._limiter = None
 

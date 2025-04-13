@@ -131,11 +131,13 @@ class BinanceApiClient(ApiClient):
         self,
         base_url: str,
         timeout: int = 10,
-        max_rate: int | None = None,
+        max_rate: int | None = None,    
+        period: float = 60,
     ):
         super().__init__(
             timeout=timeout,
             max_rate=max_rate,
+            period=period,
         )
         self._headers = {
             "Content-Type": "application/json",
@@ -155,10 +157,10 @@ class BinanceApiClient(ApiClient):
         stop=tenacity.stop_after_attempt(3),
         wait=tenacity.wait_exponential(multiplier=1, min=4, max=15),
     )
-    async def _fetch(self, method: str, endpoint: str, payload: Dict[str, Any] = None):
+    async def _fetch(self, method: str, endpoint: str, payload: Dict[str, Any] = None, weight: int = 1):
         """Make an asynchronous HTTP request."""
         if self._limiter:
-            await self._limiter.wait()
+            await self._limiter.acquire(weight=weight)
 
         self._init_session()
 
@@ -183,7 +185,6 @@ class BinanceApiClient(ApiClient):
             )
             status = response.status
             raw = await response.read()
-            self._log.debug(f"Response: {raw}")
             if 400 <= status < 500:
                 text = await response.text()
                 raise BinanceClientError(status, text, self._headers)
@@ -207,12 +208,14 @@ class BinanceUMApiClient(BinanceApiClient):
     def __init__(
         self,
         timeout: int = 10,
-        max_rate: int | None = None,
+        max_rate: int = 2400,
+        period: float = 60,
     ):
         super().__init__(
             base_url="https://fapi.binance.com",
             timeout=timeout,
             max_rate=max_rate,
+            period=period,
         )
 
         self._exchange_info_decoder = msgspec.json.Decoder(
@@ -241,8 +244,16 @@ class BinanceUMApiClient(BinanceApiClient):
             "startTime": startTime,
             "endTime": endTime,
         }
+        weight = (
+            5 if limit is None
+            else 1 if limit < 100
+            else 2 if limit < 500
+            else 5 if limit < 1000
+            else 10
+        )
+        
         payload = {k: v for k, v in payload.items() if v is not None}
-        raw = await self._fetch("GET", path, payload)
+        raw = await self._fetch("GET", path, payload, weight)
         return self._kline_decoder.decode(raw)
 
     async def kline_candlestick_data(
@@ -284,3 +295,11 @@ class BinanceUMApiClient(BinanceApiClient):
             start_time = next_start_time
 
         return BinanceUMKline(symbol, all_klines, include_unconfirmed)
+
+async def main():
+    client = BinanceUMApiClient()
+    info = await client.exchange_info()
+    print(info)
+    await client.close_session()
+
+asyncio.run(main())
