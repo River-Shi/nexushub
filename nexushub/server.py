@@ -3,6 +3,8 @@ import asyncio
 import cysimdjson
 import pandas as pd
 import pathlib
+import psycopg2
+from psycopg2.extras import execute_values
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from typing import Optional, Dict, List
 from nexushub.constants import BinanceKlineInterval
@@ -196,7 +198,11 @@ class HistoryServer:
 
     def __init__(
         self,
-        save_dir: str,
+        db_user_name: str,
+        db_password: str,
+        db_host: str,
+        db_port: int,
+        db_name: str,
         freq: BinanceKlineInterval,
         init_days: int,
         redownload: bool = False,
@@ -205,15 +211,74 @@ class HistoryServer:
         self._logger = Log.get_logger()
         self._api = BinanceUMApiClient()
         self._freq = freq
-        self._save_dir = pathlib.Path(save_dir) / f"{freq.value}"
-        self._save_dir.mkdir(parents=True, exist_ok=True)
 
         self._init_days = init_days
         self._clock = LiveClock()
         self._scheduler = AsyncIOScheduler()
         self._event = asyncio.Event()
         self._redownload = redownload
-
+        
+        self._connection = f"postgresql://{db_user_name}:{db_password}@{db_host}:{db_port}/{db_name}"
+        self._table = f"kline_{self._freq.value}"
+        
+        self._init_hypertable()
+    
+    def _init_hypertable(self):
+        with psycopg2.connect(self._connection) as conn:
+            with conn.cursor() as cursor:
+                
+                if self._redownload:
+                    sql = f"""
+                    DROP TABLE IF EXISTS {self._table};
+                    """
+                    cursor.execute(sql)
+                
+                sql = f"""
+                CREATE TABLE IF NOT EXISTS {self._table} (
+                    time TIMESTAMPTZ NOT NULL,
+                    symbol TEXT NOT NULL,
+                    open_time BIGINT NOT NULL,
+                    close_time BIGINT NOT NULL,
+                    open DOUBLE PRECISION,
+                    high DOUBLE PRECISION,
+                    low DOUBLE PRECISION,
+                    close DOUBLE PRECISION,
+                    volume DOUBLE PRECISION,
+                    quote_asset_volume DOUBLE PRECISION,
+                    number_of_trades INT,
+                    taker_base_asset_volume DOUBLE PRECISION,
+                    taker_quote_asset_volume DOUBLE PRECISION,
+                    PRIMARY KEY (time, symbol)
+                );
+                """
+                cursor.execute(sql)
+                
+                cursor.execute(f"""
+                SELECT * FROM timescaledb_information.hypertables 
+                WHERE hypertable_name = '{self._table}';
+                """)
+                
+                is_hypertable = cursor.fetchone() is not None
+                
+                # 3. 如果不是 hypertable，则转换
+                if not is_hypertable:
+                    cursor.execute(f"""
+                    SELECT create_hypertable('{self._table}', 'time', 'symbol', 4);
+                    """)
+                    self._logger.info("Table converted to hypertable successfully")
+                else:
+                    self._logger.info("Table is already a hypertable")
+    
+    def _get_latest_start_time(self, symbol: str) -> int:
+        with psycopg2.connect(self._connection) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT MAX(open_time) FROM {self._table} WHERE symbol = %s",
+                    (symbol,)
+                )
+                result = cursor.fetchone()
+                return result[0] if result else None
+                
     def _check_rate_limit(self, symbols: List[str]):
         num_symbols = len(symbols)
         request_per_sec = self._rate  # max request can be made per second
@@ -229,23 +294,15 @@ class HistoryServer:
             )
 
     async def _download_symbol(self, symbol: str):
-        file_path = self._save_dir / f"{symbol}.parquet"
-
-        if file_path.exists() and not self._redownload:
-            df = pd.read_parquet(file_path)
-            start_time = df['open_time'].values[-1] + 1
+        start_time = self._get_latest_start_time(symbol)
+        if start_time is not None:
             klines = await self._api.kline_candlestick_data(
                 symbol,
                 self._freq,
-                start_time=start_time,
+                start_time=start_time + 1,
                 include_unconfirmed=False,
                 limit=99,
-            )
-            new_df = klines.df
-            if new_df is None:
-                return
-            df = pd.concat([df, new_df])
-            df.to_parquet(file_path)
+            )                        
         else:
             start_time = (
                 self._clock.timestamp_ms() - 1000 * 60 * 60 * 24 * self._init_days
@@ -253,32 +310,54 @@ class HistoryServer:
             klines = await self._api.kline_candlestick_data(
                 symbol, self._freq, start_time=start_time, include_unconfirmed=False
             )
-            df = klines.df
-            if df is None:
-                return
-            df.to_parquet(file_path)
+        values = klines.values
+        return values
+                    
 
     async def update(self, symbols: List[str]):
         tasks = []
         for symbol in symbols:
             tasks.append(self._download_symbol(symbol))
 
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+        
+        all_values = []
+        for result in results:
+            if result:  # 确保结果不为空
+                all_values.extend(result)
+        
+        if all_values:
+            with psycopg2.connect(self._connection) as conn:
+                with conn.cursor() as cursor:
+                    execute_values(
+                        cursor,
+                        f"""
+                        INSERT INTO {self._table} (
+                            time, symbol, open_time, close_time, open, high, low, close,
+                            volume, quote_asset_volume, number_of_trades,
+                            taker_base_asset_volume, taker_quote_asset_volume
+                        ) VALUES %s
+                        ON CONFLICT (time, symbol) DO NOTHING
+                        """,
+                        all_values
+                    )
+                    self._logger.info(f"Inserted {len(all_values)} records into database")
+        
         self._logger.info(f"Updated {len(symbols)} symbols")
 
     async def start(self):
         try:
             trigger_map = {
-                BinanceKlineInterval.MINUTE_1: {"second": "1", "minute": "*"},
-                BinanceKlineInterval.MINUTE_3: {"second": "1", "minute": "*/3"},
-                BinanceKlineInterval.MINUTE_5: {"second": "1", "minute": "*/5"},
-                BinanceKlineInterval.MINUTE_15: {"second": "1", "minute": "*/15"},
+                BinanceKlineInterval.MINUTE_1: {"second": "5", "minute": "*"},
+                BinanceKlineInterval.MINUTE_3: {"second": "5", "minute": "*/3"},
+                BinanceKlineInterval.MINUTE_5: {"second": "5", "minute": "*/5"},
+                BinanceKlineInterval.MINUTE_15: {"second": "5", "minute": "*/15"},
                 BinanceKlineInterval.MINUTE_30: {"minute": "*/30"},
-                BinanceKlineInterval.HOUR_1: {"hour": "*", "minute": "0", "second": "1"},
-                BinanceKlineInterval.HOUR_4: {"hour": "*/4", "minute": "0", "second": "1"},
-                BinanceKlineInterval.HOUR_8: {"hour": "*/8", "minute": "0", "second": "1"},
-                BinanceKlineInterval.HOUR_12: {"hour": "*/12", "minute": "0", "second": "1"},
-                BinanceKlineInterval.DAY_1: {"hour": "0", "minute": "0", "second": "1"},
+                BinanceKlineInterval.HOUR_1: {"hour": "*", "minute": "0", "second": "5"},
+                BinanceKlineInterval.HOUR_4: {"hour": "*/4", "minute": "0", "second": "5"},
+                BinanceKlineInterval.HOUR_8: {"hour": "*/8", "minute": "0", "second": "5"},
+                BinanceKlineInterval.HOUR_12: {"hour": "*/12", "minute": "0", "second": "5"},
+                BinanceKlineInterval.DAY_1: {"hour": "0", "minute": "0", "second": "5"},
             }
 
             info = await self._api.exchange_info()

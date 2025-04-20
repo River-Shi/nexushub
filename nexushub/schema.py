@@ -1,7 +1,9 @@
+from symtable import Symbol
 import msgspec
 from typing import Any, List
 import time
 import pandas as pd
+import datetime
 from nexushub.constants import ContractStatus
 
 class BinanceUMRateLimit(msgspec.Struct):
@@ -103,7 +105,28 @@ class BinanceUMKline(list):
         super().__init__(klines)
         self.include_unconfirmed = include_unconfirmed
         self.symbol = symbol
-
+    
+    @property
+    def values(self) -> list[tuple]:
+        return [
+            (
+                datetime.datetime.fromtimestamp(kline.open_time / 1000, tz=datetime.timezone.utc),
+                self.symbol,
+                kline.open_time,
+                kline.close_time,
+                kline.open,
+                kline.high,
+                kline.low,
+                kline.close,
+                kline.volume,
+                kline.quote_asset_volume,
+                kline.number_of_trades,
+                kline.taker_base_asset_volume,
+                kline.taker_quote_asset_volume,
+            )
+            for kline in self if self.include_unconfirmed or kline.confirmed
+        ]
+        
     @property
     def df(self) -> pd.DataFrame | None:
         data = []
@@ -112,12 +135,12 @@ class BinanceUMKline(list):
                 data.append(
                     {
                         "open_time": kline.open_time,
+                        "close_time": kline.close_time,
                         "open": kline.open,
                         "high": kline.high,
                         "low": kline.low,
                         "close": kline.close,
                         "volume": kline.volume,
-                        "close_time": kline.close_time,
                         "quote_asset_volume": kline.quote_asset_volume,
                         "number_of_trades": kline.number_of_trades,
                         "taker_base_asset_volume": kline.taker_base_asset_volume,
@@ -129,5 +152,5 @@ class BinanceUMKline(list):
         df = pd.DataFrame(data)
         df["symbol"] = self.symbol
         df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms")
-        df.set_index("timestamp", inplace=True)
+        df = df[['timestamp', 'symbol', 'open_time', 'close_time', 'open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'number_of_trades', 'taker_base_asset_volume', 'taker_quote_asset_volume']]
         return df
