@@ -15,5 +15,22 @@ services:
     volumes:
       - timescale_data:/var/lib/postgresql/data
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    ports:
+      - "${CLICKHOUSE_PORT}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      
 volumes:
+  clickhouse_data:
+  clickhouse_logs: 
   timescale_data:

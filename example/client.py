@@ -1,25 +1,36 @@
-import psycopg2
-import os
-import pandas as pd
+import asyncio
+import msgspec
+from nexushub.constants import BinanceAccountType, BinanceKlineInterval
+from nexushub.schema import BinanceUMKlineWsResponse
+from nexushub.binance import BinanceUMApiClient, BinanceWSClient, BinanceApiClient
 
-TS_DB_NAME = os.getenv("TS_DB_NAME")
-TS_DB_USER = os.getenv("TS_DB_USER")
-TS_DB_PASSWORD = os.getenv("TS_DB_PASSWORD")
-TS_DB_PORT = int(os.getenv("TS_DB_PORT"))
+decoder = msgspec.json.Decoder(BinanceUMKlineWsResponse)
+
+def handler(msg):
+    print(decoder.decode(msg).data.parse_kline())
+
+async def main():
+    try:
+        api_client = BinanceUMApiClient()
+        info = await api_client.exchange_info()
+            
+        
+        client = BinanceWSClient(
+            account_type=BinanceAccountType.USD_M_FUTURE,
+            handler=handler,
+            loop=asyncio.get_event_loop(),
+        )
+        await client.connect()
+        client.subscribe_kline(symbols=info.active_symbols, interval=BinanceKlineInterval.HOUR_1)
+        
+        
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
-with psycopg2.connect(
-    host="127.0.0.1",
-    port=TS_DB_PORT,
-    user=TS_DB_USER,
-    password=TS_DB_PASSWORD,
-    dbname=TS_DB_NAME,
-) as conn:
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT * FROM kline_1h WHERE time >= '2025-01-01 00:00:00'")
-        rows = cursor.fetchall()
-        df = pd.DataFrame(rows, columns=[desc[0] for desc in cursor.description])
-
-df_pivot = df.pivot(index="time", columns="symbol", values="close")
-print(df_pivot)
 

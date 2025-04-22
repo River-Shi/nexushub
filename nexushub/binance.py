@@ -55,11 +55,12 @@ class BinanceWSClient(WSClient):
         account_type: BinanceAccountType,
         handler: Callable[..., Any],
         loop: asyncio.AbstractEventLoop,
+        custom_url: str | None = None,
         callback_args: tuple | None = None,
         callback_kwargs: dict | None = None,
     ):
         self._account_type = account_type
-        url = account_type.ws_url
+        url = custom_url or account_type.ws_url
         super().__init__(
             url,
             limiter=AsyncLimiter(max_rate=4, time_period=1),

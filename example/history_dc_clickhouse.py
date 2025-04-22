@@ -2,14 +2,15 @@ import asyncio
 import argparse
 import os
 from nexushub.utils import Log
-from nexushub.server import HistoryServer
+from nexushub.server import ClickHouseServer
 from nexushub.constants import BinanceKlineInterval
 
 
-TS_DB_NAME = os.getenv("TS_DB_NAME")
-TS_DB_USER = os.getenv("TS_DB_USER")
-TS_DB_PASSWORD = os.getenv("TS_DB_PASSWORD")
-TS_DB_PORT = int(os.getenv("TS_DB_PORT"))
+CLICKHOUSE_DB = os.getenv("CLICKHOUSE_DB")
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD")
+CLICKHOUSE_HOST = "localhost"
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT"))
 
 
 parser = argparse.ArgumentParser()
@@ -23,12 +24,12 @@ async def main():
     try:
         args = parser.parse_args()
         Log.setup_logger(log_level=args.log_level)
-        server = HistoryServer(
-            db_user_name=TS_DB_USER,
-            db_password=TS_DB_PASSWORD,
-            db_host="127.0.0.1",
-            db_port=TS_DB_PORT,
-            db_name=TS_DB_NAME,
+        server = ClickHouseServer(
+            db_user_name=CLICKHOUSE_USER,
+            db_password=CLICKHOUSE_PASSWORD,
+            db_host=CLICKHOUSE_HOST,
+            db_port=CLICKHOUSE_PORT,
+            db_name=CLICKHOUSE_DB,
             freq=BinanceKlineInterval(args.freq),
             init_days=args.init_days,
             redownload=args.redownload,

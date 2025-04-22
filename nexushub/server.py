@@ -1,8 +1,7 @@
 import msgspec
 import asyncio
 import cysimdjson
-import pandas as pd
-import pathlib
+import clickhouse_connect
 import psycopg2
 from psycopg2.extras import execute_values
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -205,6 +204,7 @@ class HistoryServer:
         db_name: str,
         freq: BinanceKlineInterval,
         init_days: int,
+        update_symbol: bool = False,
         redownload: bool = False,
     ):
         self._rate = 2400 / 60 / 2
@@ -217,11 +217,14 @@ class HistoryServer:
         self._scheduler = AsyncIOScheduler()
         self._event = asyncio.Event()
         self._redownload = redownload
+        self._update_symbol = update_symbol
         
         self._connection = f"postgresql://{db_user_name}:{db_password}@{db_host}:{db_port}/{db_name}"
         self._table = f"kline_{self._freq.value}"
         
+        self._symbols = None
         self._init_hypertable()
+        
     
     def _init_hypertable(self):
         with psycopg2.connect(self._connection) as conn:
@@ -314,9 +317,13 @@ class HistoryServer:
         return values
                     
 
-    async def update(self, symbols: List[str]):
+    async def update(self):
+        if self._update_symbol:
+            info = await self._api.exchange_info()
+            self._symbols = info.active_symbols
+        
         tasks = []
-        for symbol in symbols:
+        for symbol in self._symbols:
             tasks.append(self._download_symbol(symbol))
 
         results = await asyncio.gather(*tasks)
@@ -343,7 +350,7 @@ class HistoryServer:
                     )
                     self._logger.info(f"Inserted {len(all_values)} records into database")
         
-        self._logger.info(f"Updated {len(symbols)} symbols")
+        self._logger.info(f"Updated {len(self._symbols)} symbols")
 
     async def start(self):
         try:
@@ -361,19 +368,184 @@ class HistoryServer:
             }
 
             info = await self._api.exchange_info()
-            symbols = info.active_symbols
+            self._symbols = info.active_symbols
 
-            self._logger.info(f"Start downloading {len(symbols)} symbols")
+            self._logger.info(f"Start downloading {len(self._symbols)} symbols")
 
-            self._check_rate_limit(symbols)
+            self._check_rate_limit(self._symbols)
 
-            await self.update(symbols)
+            await self.update()
 
             self._scheduler.add_job(
                 self.update,
                 "cron",
                 **trigger_map[self._freq],
-                kwargs={"symbols": symbols},
+            )
+            self._scheduler.start()
+
+            await self._event.wait()
+        finally:
+            await self.stop()
+
+    async def stop(self):
+        await self._api.close_session()
+        self._event.set()
+
+class ClickHouseServer:
+    """
+    1s 20 rate limit
+    """
+
+    def __init__(
+        self,
+        db_user_name: str,
+        db_password: str,
+        db_host: str,
+        db_port: int,
+        db_name: str,
+        freq: BinanceKlineInterval,
+        init_days: int,
+        update_symbol: bool = False,
+        redownload: bool = False,
+    ):
+        self._rate = 2400 / 60 / 2
+        self._logger = Log.get_logger()
+        self._api = BinanceUMApiClient()
+        self._freq = freq
+
+        self._init_days = init_days
+        self._clock = LiveClock()
+        self._scheduler = AsyncIOScheduler()
+        self._event = asyncio.Event()
+        self._redownload = redownload
+        self._update_symbol = update_symbol
+        
+        self._client = clickhouse_connect.get_client(host=db_host, port=db_port, user=db_user_name, password=db_password, database=db_name)
+        self._table = f"kline_{self._freq.value}"
+        
+        self._symbols = None
+        self._init_table()
+        
+    
+    def _init_table(self):
+        if self._redownload:
+            sql = f"""
+            DROP TABLE IF EXISTS {self._table}
+            """
+            self._client.command(sql)
+        
+        sql = f"""
+        CREATE TABLE IF NOT EXISTS {self._table} (
+            time DateTime64(3, 'UTC'),
+            symbol LowCardinality(String),
+            open_time UInt64,
+            close_time UInt64,
+            open Float64,
+            high Float64,
+            low Float64,
+            close Float64,
+            volume Float64,
+            quote_asset_volume Float64,
+            number_of_trades UInt64,
+            taker_base_asset_volume Float64,
+            taker_quote_asset_volume Float64,
+        ) ENGINE = MergeTree()
+        PARTITION BY toYYYYMM(time)
+        ORDER BY (symbol, time)
+        """
+        self._client.command(sql)
+    
+    def _get_latest_start_time(self, symbol: str) -> int:
+        sql = f"""
+        SELECT MAX(open_time) FROM {self._table} WHERE symbol = '{symbol}'
+        """
+        result = self._client.command(sql)
+        return result
+                
+    def _check_rate_limit(self, symbols: List[str]):
+        num_symbols = len(symbols)
+        request_per_sec = self._rate  # max request can be made per second
+        init_days_2_sec = self._init_days * 24 * 60 * 60  # total seconds to download
+        per_request_sec = self._freq.seconds * 499  # one request seconds
+
+        num_requests_needed = init_days_2_sec / per_request_sec * num_symbols
+        sec_requests_takes = num_requests_needed / request_per_sec
+
+        if sec_requests_takes * 2 > self._freq.seconds:
+            raise RuntimeError(
+                f"Not recommended to download freq: {self._freq.value} for {self._init_days} days. Please reduce the `init_days` or choose a higher `frequency`."
+            )
+
+    async def _download_symbol(self, symbol: str):
+        start_time = self._get_latest_start_time(symbol)
+        if start_time is not None:
+            klines = await self._api.kline_candlestick_data(
+                symbol,
+                self._freq,
+                start_time=start_time + 1,
+                include_unconfirmed=False,
+                limit=99,
+            )                        
+        else:
+            start_time = (
+                self._clock.timestamp_ms() - 1000 * 60 * 60 * 24 * self._init_days
+            )
+            klines = await self._api.kline_candlestick_data(
+                symbol, self._freq, start_time=start_time, include_unconfirmed=False
+            )
+        values = klines.values
+        return values
+                    
+
+    async def update(self):
+        if self._update_symbol:
+            info = await self._api.exchange_info()
+            self._symbols = info.active_symbols
+        
+        tasks = []
+        for symbol in self._symbols:
+            tasks.append(self._download_symbol(symbol))
+
+        results = await asyncio.gather(*tasks)
+        
+        all_values = []
+        for result in results:
+            if result:  # 确保结果不为空
+                all_values.extend(result)
+        
+        if all_values:
+            self._client.insert(self._table, all_values)
+        
+        self._logger.info(f"Updated {len(self._symbols)} symbols")
+
+    async def start(self):
+        try:
+            trigger_map = {
+                BinanceKlineInterval.MINUTE_1: {"second": "5", "minute": "*"},
+                BinanceKlineInterval.MINUTE_3: {"second": "5", "minute": "*/3"},
+                BinanceKlineInterval.MINUTE_5: {"second": "5", "minute": "*/5"},
+                BinanceKlineInterval.MINUTE_15: {"second": "5", "minute": "*/15"},
+                BinanceKlineInterval.MINUTE_30: {"minute": "*/30"},
+                BinanceKlineInterval.HOUR_1: {"hour": "*", "minute": "0", "second": "5"},
+                BinanceKlineInterval.HOUR_4: {"hour": "*/4", "minute": "0", "second": "5"},
+                BinanceKlineInterval.HOUR_8: {"hour": "*/8", "minute": "0", "second": "5"},
+                BinanceKlineInterval.HOUR_12: {"hour": "*/12", "minute": "0", "second": "5"},
+                BinanceKlineInterval.DAY_1: {"hour": "0", "minute": "0", "second": "5"},
+            }
+
+            info = await self._api.exchange_info()
+            self._symbols = info.active_symbols
+
+            self._logger.info(f"Start downloading {len(self._symbols)} symbols")
+
+            self._check_rate_limit(self._symbols)
+
+            await self.update()
+
+            self._scheduler.add_job(
+                self.update,
+                "cron",
+                **trigger_map[self._freq],
             )
             self._scheduler.start()
 
