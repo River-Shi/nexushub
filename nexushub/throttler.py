@@ -2,12 +2,7 @@ import asyncio
 import time
 from collections import deque
 from nexushub.utils import Log
-from multiprocessing import shared_memory, Lock
-import numpy as np
-from typing import Deque
-from contextlib import contextmanager
-from filelock import FileLock 
-import os
+import redis.asyncio as redis
 
 class AsyncThrottler:
     """
@@ -156,185 +151,207 @@ class AsyncThrottler:
         pass
     
     
-
-
-class SharedThrottler:
+class RedisThrottler:
     """
-    A cross-process rate limiter based on shared memory.
-    Ensures multiple processes share the same limiter by using the shared memory name.
-    Shared memory structure: [window_start_time, current_weight, ref_count]
+    A distributed throttler based on Redis that limits cumulative weight across multiple processes.
+    
+    Uses Redis to track and limit API requests across different processes sharing the same key.
     """
-    def __init__(
-        self,
-        rate_limit: int,
-        period: float = 60.0,
-        name: str = "nexushub_throttler"
-    ):
+    def __init__(self, rate_limit: int, period: float = 60.0, bucket_key: str = "default_throttler",
+                 redis_url: str = "redis://:Quant2025!@localhost:6379/0"):
+        """
+        Initializes the Redis-based throttler.
+
+        Args:
+            rate_limit: The maximum cumulative weight allowed within the period.
+            period: The time period in seconds (default is 60 for per minute).
+            bucket_key: The Redis key used to identify this specific throttler.
+            redis_url: URL for connecting to Redis.
+        """
         if rate_limit <= 0:
             raise ValueError("Rate limit must be positive")
         if period <= 0:
             raise ValueError("Period must be positive")
-        if name.startswith("/"):
-            raise ValueError("Shared memory name cannot start with '/'")
         
         self.rate_limit = rate_limit
         self.period = period
-        self.shm_name = name
+        self.bucket_key = bucket_key
+        self.redis_url = redis_url
+        
+        self._redis_client = None
         self._logger = Log.get_logger()
+        self._local_lock = asyncio.Lock()
+        self._waiters: deque[asyncio.Future] = deque()
         
+        self._logger.debug(f"RedisThrottler initialized: Limit={rate_limit} weight / {period} seconds using key '{bucket_key}'")
+    
+    async def _get_redis(self) -> redis.Redis:
+        """Get or create the Redis client."""
+        if self._redis_client is None:
+            self._redis_client = await redis.from_url(self.redis_url)
+        return self._redis_client
+    
+    async def _get_current_weight(self) -> int:
+        """Get the current accumulated weight from Redis."""
+        redis_client = await self._get_redis()
+        value = await redis_client.get(self.bucket_key)
+        if value is None:
+            return 0
+        return int(value)
+    
+    async def _check_and_reset_window(self) -> bool:
+        """Check if the time window needs resetting and reset if needed."""
+        redis_client = await self._get_redis()
         
-        lock_file = f"/tmp/{name}.lock"
-        self._lock = FileLock(lock_file)
+        # Get the window start time
+        window_key = f"{self.bucket_key}_window_start"
+        window_start = await redis_client.get(window_key)
         
-        # waiting queue (in-process)
-        self._waiters: Deque[asyncio.Future] = deque()
-        
-        # initialize or connect to the shared memory
-        try:
-            # Try to connect to existing shared memory first
-            self._shm = shared_memory.SharedMemory(name=name)
-            self._data = np.ndarray((3,), dtype=np.float64, buffer=self._shm.buf)
-            with self._acquire_lock():
-                self._data[2] += 1  # Increment reference count
-            self._logger.debug(f"Connected to existing shared memory '{name}', ref_count={self._data[2]}")
-        except FileNotFoundError:
-            # If not exists, create new shared memory
-            self._shm = shared_memory.SharedMemory(
-                name=name,
-                create=True,
-                size=3 * 8  # 3 float64
-            )
-            self._data = np.ndarray((3,), dtype=np.float64, buffer=self._shm.buf)
-            self._data[0] = time.time()  # window_start_time
-            self._data[1] = 0.0  # current_weight
-            self._data[2] = 1.0  # reference count
-            self._logger.debug(f"Created new shared memory '{name}', ref_count=1")
-        
-        
-    def _notify_waiters(self):
-        """notify the waiting tasks"""
-        if self._waiters:
-            waiter = self._waiters[0]
-            if not waiter.done():
-                waiter.set_result(True)
-            
-    @contextmanager
-    def _acquire_lock(self, timeout: float = 1.0):
-        """get the process lock context manager"""
-        acquired = self._lock.acquire(timeout=timeout)
-        if not acquired:
-            raise TimeoutError("Failed to acquire lock")
-        try:
-            yield
-        finally:
-            self._lock.release()
-            
-    def _check_and_reset_window(self) -> bool:
-        """check and reset the time window"""
         now = time.time()
-        window_start = self._data[0]
         
-        if now - window_start >= self.period:
-            self._data[0] = now
-            old_weight = self._data[1]
-            self._data[1] = 0.0
-            self._logger.debug(
-                f"Time window reset in shared memory '{self.shm_name}'. "
-                f"Old weight: {old_weight}"
-            )
-            return True
-        return False
+        # If window start doesn't exist, set it now
+        if window_start is None:
+            await redis_client.set(window_key, str(now), ex=int(self.period * 2))
+            return False
+        
+        # Check if window needs resetting
+        window_start = float(window_start)
+        elapsed = now - window_start
+        
+        if elapsed >= self.period:
+            # Update window start time
+            lapsed_periods = int(elapsed // self.period)
+            new_start = window_start + lapsed_periods * self.period
             
+            # Use a transaction to reset the weight and update window
+            tr = redis_client.pipeline()
+            tr.set(self.bucket_key, "0")
+            tr.set(window_key, str(new_start), ex=int(self.period * 2))
+            await tr.execute()
+            
+            self._logger.debug(f"Time window reset. New start: {new_start:.2f}")
+            return True
+            
+        return False
+    
+    def _notify_waiters(self):
+        """Notify the first waiter, if any."""
+        if self._waiters:
+            waiter_future = self._waiters[0]
+            if not waiter_future.done():
+                waiter_future.set_result(True)
+    
     async def acquire(self, weight: int = 1) -> None:
-        """acquire the weight permission"""
+        """
+        Acquires permission to proceed, waiting if necessary.
+
+        Args:
+            weight: The weight cost of the operation to be performed.
+
+        Raises:
+            ValueError: If the requested weight exceeds the total rate limit.
+        """
         if weight < 0:
             raise ValueError("Weight cannot be negative")
         if weight > self.rate_limit:
-            raise ValueError(f"Weight {weight} exceeds limit {self.rate_limit}")
-            
-        my_waiter = None
+            raise ValueError(
+                f"Requested weight {weight} exceeds the total rate limit {self.rate_limit} per period."
+            )
+        
+        my_waiter_future = None
+        redis_client = await self._get_redis()
         
         while True:
-            try:
-                with self._acquire_lock():
-                    was_reset = self._check_and_reset_window()
-                    current_weight = self._data[1]
+            async with self._local_lock:
+                # Check and potentially reset the time window
+                was_reset = await self._check_and_reset_window()
+                
+                # Get current weight
+                current_weight = await self._get_current_weight()
+                
+                # Check if the current request can be accommodated
+                if current_weight + weight <= self.rate_limit:
+                    # Use Lua script for atomic increment
+                    # This ensures we don't exceed the limit due to race conditions
+                    lua_script = """
+                    local current = redis.call('get', KEYS[1])
+                    if current == false then current = 0 else current = tonumber(current) end
+                    local new_weight = current + tonumber(ARGV[1])
+                    if new_weight <= tonumber(ARGV[2]) then
+                        redis.call('set', KEYS[1], new_weight)
+                        return 1
+                    else
+                        return 0
+                    end
+                    """
                     
-                    if current_weight + weight <= self.rate_limit:
-                        self._data[1] = current_weight + weight
-                        self._logger.debug(
-                            f"[{self.shm_name}] Acquired {weight} weight. "
-                            f"Current total: {current_weight + weight}/{self.rate_limit}"
-                        )
+                    result = await redis_client.eval(
+                        lua_script,
+                        1,  # number of keys
+                        self.bucket_key,  # key
+                        weight,  # weight to add (ARGV[1])
+                        self.rate_limit  # max weight (ARGV[2])
+                    )
+                    
+                    if result == 1:
+                        # Successfully acquired weight
+                        self._logger.debug(f"Acquired {weight} weight. New total: {current_weight + weight}/{self.rate_limit}")
                         
-                        if my_waiter and my_waiter in self._waiters:
+                        # Remove this task's waiter if it exists
+                        if my_waiter_future and my_waiter_future in self._waiters:
                             try:
-                                self._waiters.remove(my_waiter)
+                                self._waiters.remove(my_waiter_future)
                             except ValueError:
                                 pass
-                            
+                                
+                        # Notify next waiter if window was reset
                         if was_reset:
                             self._notify_waiters()
                             
                         return
-                    else:
-                        window_start = self._data[0]
-                        wait_time = max(0, window_start + self.period - time.time())
-                        
-                        if my_waiter is None:
-                            my_waiter = asyncio.get_running_loop().create_future()
-                            self._waiters.append(my_waiter)
-                            
-                        self._logger.debug(
-                            f"[{self.shm_name}] Limit reached ({current_weight}/{self.rate_limit}). "
-                            f"Need {weight} weight. "
-                            f"Waiting {wait_time:.2f}s for reset"
-                        )
-                    
-            except TimeoutError:
-                self._logger.debug(f"[{self.shm_name}] Timeout error, waiting for 0.1s")
-                await asyncio.sleep(0.1)
-                continue
                 
+                # Need to wait for capacity
+                window_key = f"{self.bucket_key}_window_start"
+                window_start = float(await redis_client.get(window_key) or time.time())
+                now = time.time()
+                time_until_reset = (window_start + self.period) - now
+                
+                self._logger.debug(f"Limit reached. Need {weight} weight. Waiting for window reset in {max(0, time_until_reset):.2f}s.")
+                
+                # Create a future for waiting if not already done
+                if my_waiter_future is None:
+                    my_waiter_future = asyncio.get_running_loop().create_future()
+                    self._waiters.append(my_waiter_future)
+            
+            # Wait outside the lock
             try:
-                await asyncio.wait_for(
-                    my_waiter,
-                    timeout=max(0, wait_time) + 0.01
-                )
+                await asyncio.wait_for(my_waiter_future, timeout=max(0, time_until_reset) + 0.01)
+                continue  # We were notified, try again
             except asyncio.TimeoutError:
-                continue
-                
-    async def __aenter__(self):
+                # Timeout occurred, window should have reset
+                if my_waiter_future in self._waiters:
+                    try:
+                        self._waiters.remove(my_waiter_future)
+                        my_waiter_future = None
+                    except ValueError:
+                        pass
+                continue  # Try again
+    
+    async def __aenter__(self) -> None:
+        """Asynchronous context manager entry."""
         await self.acquire()
-        return self
-        
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return None
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Asynchronous context manager exit."""
         pass
     
-    def cleanup(self):
-        """Close the shared memory connection and update reference count."""
-        if hasattr(self, '_shm'):
-            try:
-                with self._acquire_lock():
-                    self._data[2] -= 1  # Decrement reference count
-                    ref_count = self._data[2]
-                    self._logger.debug(f"Decremented ref_count to {ref_count} for '{self.shm_name}'")
-                    
-                    if ref_count <= 0:
-                        self._shm.unlink()
-                        self._logger.debug(f"Unlinked shared memory '{self.shm_name}' as last user")
-                    
-                self._shm.close()
-                self._logger.debug(f"Closed shared memory connection '{self.shm_name}'")
-            except Exception as e:
-                self._logger.error(f"Error in close: {e}")
-    
-    
-    
+    async def cleanup(self) -> None:
+        """Close Redis connections and clean up resources."""
+        if self._redis_client:
+            await self._redis_client.aclose()
+            self._redis_client = None
 
-# --- Example Usage ---
-
-# Simulate different API calls with different weights
 async def fetch_order_data(throttler: AsyncThrottler, order_id: int):
     api_weight = 10  # Example weight for /api/order
     print(f"Task {order_id}: Attempting to acquire {api_weight} weight for order data...")
@@ -365,12 +382,16 @@ async def main():
     # Use Binance actual limits
     binance_limit = 100
     binance_period = 10 # seconds
-    throttler = SharedThrottler(rate_limit=binance_limit, period=binance_period)
+    throttler = RedisThrottler(
+        rate_limit=binance_limit, 
+        period=binance_period,
+        bucket_key="binance_api"
+    )
 
 
     tasks = []
     # Create a mix of tasks with different weights
-    for i in range(11): # Simulate 5 order fetches
+    for i in range(20): # Simulate 5 order fetches
         tasks.append(fetch_order_data(throttler, i + 1))
 
     # for i in range(20): # Simulate 20 ticker fetches
@@ -388,7 +409,7 @@ async def main():
     # With the 2400/60s limit, the 5 heavy tasks alone exceed the limit.
     # The total time should be slightly over 60 seconds if the last heavy task
     # had to wait for the window reset.
-    throttler.cleanup()
+    await throttler.cleanup()
 
 if __name__ == "__main__":
     # To see debug logs, uncomment this line:

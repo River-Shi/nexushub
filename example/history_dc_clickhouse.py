@@ -16,7 +16,7 @@ CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT"))
 parser = argparse.ArgumentParser()
 parser.add_argument("--freq", type=str, default=BinanceKlineInterval.HOUR_1.value)
 parser.add_argument("--init_days", type=int, default=120)
-parser.add_argument("--redownload", type=bool, default=False)
+parser.add_argument("--redownload", type=bool, default=True)
 parser.add_argument("--log-level", type=str, default="INFO")
 parser.add_argument("--update_symbol", type=bool, default=True)
 

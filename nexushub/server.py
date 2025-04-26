@@ -436,7 +436,7 @@ class ClickHouseServer:
         
         sql = f"""
         CREATE TABLE IF NOT EXISTS {self._table} (
-            time DateTime64(3, 'UTC'),
+            timestamp DateTime64(3, 'UTC'),
             symbol LowCardinality(String),
             open_time UInt64,
             close_time UInt64,
@@ -450,8 +450,8 @@ class ClickHouseServer:
             taker_base_asset_volume Float64,
             taker_quote_asset_volume Float64,
         ) ENGINE = MergeTree()
-        PARTITION BY toYYYYMM(time)
-        ORDER BY (symbol, time)
+        PARTITION BY toYYYYMM(timestamp)
+        ORDER BY (symbol, timestamp)
         """
         self._client.command(sql)
     
@@ -478,7 +478,7 @@ class ClickHouseServer:
 
     async def _download_symbol(self, symbol: str):
         start_time = self._get_latest_start_time(symbol)
-        if start_time is not None:
+        if start_time:
             klines = await self._api.kline_candlestick_data(
                 symbol,
                 self._freq,
