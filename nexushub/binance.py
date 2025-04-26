@@ -13,6 +13,8 @@ from nexushub.schema import (
     BinanceUMExchangeInfoResponse,
     BinanceUMKlineResponse,
     BinanceUMKline,
+    BinanceUMFundingRateResponse,
+    BinanceUMFuningRate,
 )
 from nexushub.constants import BinanceKlineInterval, BinanceAccountType
 from nexushub.ws_client import WSClient
@@ -223,11 +225,61 @@ class BinanceUMApiClient(BinanceApiClient):
             BinanceUMExchangeInfoResponse
         )
         self._kline_decoder = msgspec.json.Decoder(list[BinanceUMKlineResponse])
-
+        self._funding_rate_decoder = msgspec.json.Decoder(list[BinanceUMFundingRateResponse])
+        
     async def exchange_info(self) -> BinanceUMExchangeInfoResponse:
         path = "/fapi/v1/exchangeInfo"
         raw = await self._fetch("GET", path)
         return self._exchange_info_decoder.decode(raw)
+    
+    async def get_api_fapi_v1_funding_rate_history(
+        self,
+        symbol: str,
+        startTime: int | None = None,
+        endTime: int | None = None,
+        limit: int | None = None,
+    ) -> list[BinanceUMFundingRateResponse]:
+        path = "/fapi/v1/fundingRate"
+        payload = {
+            "symbol": symbol,
+            "startTime": startTime,
+            "endTime": endTime,
+            "limit": limit,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
+        raw = await self._fetch("GET", path, payload, weight=1)
+        return self._funding_rate_decoder.decode(raw)
+    
+    async def funding_rate_history_data(
+        self,
+        symbol: str,
+        startTime: int | None = None,
+        endTime: int | None = None,
+        limit: int = 1000,
+    ):
+        end_time_ms = int(endTime) if endTime is not None else sys.maxsize
+        all_funding_rates: list[BinanceUMFundingRateResponse] = []
+        while True:
+            funding_rates: list[BinanceUMFundingRateResponse] = await self.get_api_fapi_v1_funding_rate_history(
+                symbol=symbol,
+                startTime=startTime,
+                endTime=endTime,
+                limit=limit,
+            )
+            all_funding_rates.extend(funding_rates)
+
+            if funding_rates:
+                next_start_time = funding_rates[-1].fundingTime + 1
+            else:
+                break
+
+            if limit and len(funding_rates) < limit or next_start_time >= end_time_ms:
+                break
+
+            startTime = next_start_time
+
+        return BinanceUMFuningRate(symbol, all_funding_rates)
+            
 
     async def get_api_fapi_v1_klines(
         self,
@@ -296,3 +348,17 @@ class BinanceUMApiClient(BinanceApiClient):
             start_time = next_start_time
 
         return BinanceUMKline(symbol, all_klines, include_unconfirmed)
+
+
+async def main():
+    import time
+    client = BinanceUMApiClient()
+    
+    start_time = int(time.time() * 1000) - 1000 * 60 * 60 * 24 * 365 * 2
+    
+    funding_rate = await client.funding_rate_history_data(symbol="BTCUSDT", startTime=start_time)
+    print(funding_rate.df)
+    await client.close_session()
+
+if __name__ == "__main__":
+    asyncio.run(main())

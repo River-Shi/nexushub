@@ -6,6 +6,12 @@ import datetime
 from nexushub.constants import ContractStatus, BinanceKlineInterval
 
 
+class BinanceUMFundingRateResponse(msgspec.Struct):
+    symbol: str
+    fundingRate: str
+    fundingTime: int
+    markPrice: str
+
 class BinanceUMRateLimit(msgspec.Struct):
     interval: str
     intervalNum: int
@@ -97,6 +103,36 @@ class SubscriptionRequest(msgspec.Struct):
     params: list[str]
     id: int | None = None
 
+class BinanceUMFuningRate(list):
+    def __init__(
+        self,
+        symbol: str,
+        funding_rates: list[BinanceUMFundingRateResponse],
+    ):
+        super().__init__(funding_rates)
+        self.symbol = symbol
+
+    @property
+    def values(self) -> list[tuple]:
+        return [
+            (
+                datetime.datetime.fromtimestamp(
+                    funding_rate.fundingTime / 1000, tz=datetime.timezone.utc
+                ),
+                self.symbol,
+                funding_rate.fundingRate,
+                funding_rate.markPrice,
+            )
+            for funding_rate in self
+        ]
+
+    @property
+    def df(self) -> pd.DataFrame | None:
+        if not self:
+            return None
+        df = pd.DataFrame(self.values, columns=["timestamp", "symbol", "funding_rate", "mark_price"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
 
 class BinanceUMKline(list):
     def __init__(
