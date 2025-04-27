@@ -1,6 +1,7 @@
 import clickhouse_connect
 import os
 import time
+import polars as pl
 
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD")
@@ -20,8 +21,8 @@ def main():
     query = "SELECT * FROM kline_1h ORDER BY timestamp"
     
     time_start = time.time()
-    df = client.query_df(query)
-    
+    data = client.query_arrow(query)
+    df = pl.from_arrow(data)
     time_end = time.time()
     print(f"Query execution time: {time_end - time_start} seconds")
     
