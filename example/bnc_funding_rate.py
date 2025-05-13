@@ -2,7 +2,7 @@ from nexushub.binance import BinanceUMApiClient
 from nexushub.utils import Log
 from pathlib import Path
 import asyncio
-
+import pandas as pd
 Log.setup_logger()
 log = Log.get_logger()
 
@@ -13,16 +13,22 @@ async def process_symbol(client, symbol_info):
     symbol = symbol_info.symbol
     parquet_path = folder_path / f"{symbol}.parquet"
     
-    if parquet_path.exists():
-        return
-    
     try:
-        startTime = symbol_info.onboardDate
+        if parquet_path.exists():
+            startTime = int(pd.read_parquet(parquet_path).iloc[-1].timestamp.timestamp() * 1000) + 1
+        else:
+            startTime = symbol_info.onboardDate
+        
         funding_rate = await client.funding_rate_history_data(symbol=symbol, startTime=startTime)
         
-        df = funding_rate.df
-        df.to_parquet(parquet_path)
-        log.info(f"Saved {symbol} to {parquet_path}")
+        if parquet_path.exists():
+            df = pd.concat([pd.read_parquet(parquet_path), funding_rate.df])
+        else:
+            df = funding_rate.df
+        
+        if df is not None:
+            df.to_parquet(parquet_path)
+            log.info(f"Saved {symbol} to {parquet_path}")
     except Exception as e:
         log.error(f"Error processing {symbol}: {e}")
 

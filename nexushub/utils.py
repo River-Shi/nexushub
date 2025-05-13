@@ -5,6 +5,17 @@ from typing import Optional
 from loguru import logger
 from datetime import timezone, datetime
 
+def safe_timestamp(ts: int | float) -> datetime:
+    ts = int(ts)
+    # 判断时间戳的数量级
+    if ts > 1e18:  # 纳秒
+        ts = ts / 1e9
+    elif ts > 1e15:  # 微秒
+        ts = ts / 1e6
+    elif ts > 1e12:  # 毫秒
+        ts = ts / 1e3
+    # else: 认为是秒
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 class LiveClock:
     def __init__(self):

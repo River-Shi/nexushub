@@ -4,7 +4,7 @@ import time
 import pandas as pd
 import datetime
 from nexushub.constants import ContractStatus, BinanceKlineInterval
-
+from nexushub.utils import safe_timestamp
 
 class BinanceUMFundingRateResponse(msgspec.Struct):
     symbol: str
@@ -103,6 +103,7 @@ class SubscriptionRequest(msgspec.Struct):
     params: list[str]
     id: int | None = None
 
+
 class BinanceUMFuningRate(list):
     def __init__(
         self,
@@ -116,9 +117,7 @@ class BinanceUMFuningRate(list):
     def values(self) -> list[tuple]:
         return [
             (
-                datetime.datetime.fromtimestamp(
-                    funding_rate.fundingTime / 1000, tz=datetime.timezone.utc
-                ),
+                safe_timestamp(funding_rate.fundingTime),
                 self.symbol,
                 funding_rate.fundingRate,
                 funding_rate.markPrice,
@@ -131,7 +130,6 @@ class BinanceUMFuningRate(list):
         if not self:
             return None
         df = pd.DataFrame(self.values, columns=["timestamp", "symbol", "funding_rate", "mark_price"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         return df
 
 class BinanceUMKline(list):
